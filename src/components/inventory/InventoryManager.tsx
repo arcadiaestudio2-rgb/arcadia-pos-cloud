@@ -1,18 +1,10 @@
-import React, { useState } from 'react';
+import { useState } from 'react';
 import { 
   Plus, 
-  RotateCcw, 
   History, 
-  Settings2,
   Package,
-  ArrowDownToLine,
-  TrendingUp,
-  AlertTriangle,
-  FileCheck,
   Lock,
-  UserCheck,
-  ChevronDown,
-  Zap
+  UserCheck
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { StockList } from './StockList';
@@ -32,29 +24,24 @@ export function InventoryManager() {
     movements, 
     loading, 
     error, 
-    refresh, 
     loadMoreMovements,
     hasMore,
     loadingMore,
     updateStock,
     updateFinancialData,
     annulSession,
-    categories,
-    brands,
-    seasons,
-    colors,
-    addAttribute,
     updateProduct,
     getProductById,
     deletedProducts,
+    attributes,
     restoreProduct
   } = inventory;
   const [activeTab, setActiveTab] = useState('stock');
-  const { selectedOperator, operatorName, setSelectedOperator, operators, isOperatorSelected } = useOperator();
+  const { operatorName, isOperatorSelected } = useOperator();
 
   // Estadísticas dinámicas
   const criticalCount = products.filter(v => v.stock <= 0).length;
-  const lowStockCount = products.filter(v => v.stock > 0 && v.stock <= v.stock_minimo).length;
+  const lowStockCount = products.filter(v => v.stock > 0 && v.stock <= (v.stockMinimo || 0)).length;
 
   return (
     <div className="flex flex-col h-full bg-surface relative overflow-hidden">
@@ -119,15 +106,14 @@ export function InventoryManager() {
                     loading={loading}
                     updateStock={updateStock}
                     updateFinancialData={updateFinancialData}
-                    categories={Array.isArray(categories) ? categories.map(c => c.name) : []}
-                    brands={Array.isArray(brands) ? brands.map(b => b.name) : []}
-                    seasons={Array.isArray(seasons) ? seasons.map(s => s.name) : []}
-                    allColors={Array.isArray(colors) ? colors.map(c => c.name) : []}
-                    onAddAttribute={addAttribute}
                     onUpdateProduct={updateProduct}
                     onGetProductById={getProductById}
                     deletedProducts={deletedProducts}
                     restoreProduct={restoreProduct}
+                    categories={attributes.categories}
+                    brands={attributes.brands}
+                    seasons={attributes.seasons}
+                    allColors={attributes.colors}
                   />
                 )}
                 {activeTab === 'historial' && (

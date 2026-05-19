@@ -47,3 +47,10 @@ export const calculateDebitPrice = (pvpEffective: number, surcharge: number): nu
 export const calculateCreditPrice = (pvpEffective: number, surcharge: number): number => {
   return Math.round(pvpEffective * (1 + surcharge / 100));
 };
+
+/**
+ * Aliases for ProductEditor compatibility (maintain legacy naming)
+ */
+export const calculatePriceCash = calculatePVP;
+export const calculatePriceDebit = calculateDebitPrice;
+export const calculatePriceCredit = calculateCreditPrice;

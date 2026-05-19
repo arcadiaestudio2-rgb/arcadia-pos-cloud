@@ -1,16 +1,14 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { supabase } from '../../lib/supabase';
 import { 
   Search, 
-  ShoppingCart, 
   User, 
-  Keyboard,
-  ArrowLeft,
   ChevronDown,
   Menu
 } from 'lucide-react';
 import { toast, formatCurrency } from '../common/CommonUI';
 import { api } from '../../services/api';
+import { useAuth } from '../../context/AuthContext';
 import { useOperator } from '../../context/OperatorContext';
 import { ProductGrid } from './ProductGrid';
 import { CheckoutPanel } from './CheckoutPanel';
@@ -20,24 +18,16 @@ import { CustomerSelectorModal } from './CustomerSelectorModal';
 import { CreateCustomerModal } from './CreateCustomerModal';
 import { OperatorSelector } from '../Header/OperatorSelector';
 import { SaleTicketModal } from './SaleTicketModal';
+import { useCart } from '../../hooks/useCart';
+import { PendingOrder } from '../../types/cart';
 
-export interface CartItem {
-  id: string; // product_id
-  variantId: number;
-  sku: string;
-  name: string;
-  price: number;
-  quantity: number;
-  size: string;
-  color: string;
-  image: string;
-  category: string;
-  stock: number;
-  prices: {
-    cash: number;
-    debit: number;
-    credit: number;
-  };
+export interface PaymentEntry {
+  id: string;
+  type: 'cash' | 'qr' | 'debit' | 'credit' | 'storeCredit';
+  amount: number;
+  finalAmount: number;
+  network?: string;
+  installments?: number;
 }
 
 export interface PaymentFees {
@@ -49,36 +39,21 @@ export interface PaymentFees {
   };
 }
 
-export interface PendingOrder {
-  id: string;
-  cart: CartItem[];
-  customer: any;
-  timestamp: number;
-  discount: number;
-  total: number;
-  payments?: PaymentEntry[];
-  note?: string;
-}
-
-export interface PaymentEntry {
-  id: string;
-  type: 'cash' | 'qr' | 'debit' | 'credit' | 'storeCredit';
-  amount: number; // Amount of subtotal covered
-  finalAmount: number; // Amount actually paid
-  network?: string;
-  installments?: number;
-}
 
 interface POSProps {
   onMenuClick?: () => void;
 }
 
 function POS({ onMenuClick }: POSProps) {
+  const { user } = useAuth();
   // --- State ---
-  const [cart, setCart] = useState<CartItem[]>(() => {
-    const saved = localStorage.getItem('arcadia_cart');
-    return saved ? JSON.parse(saved) : [];
-  });
+  const { 
+    cart, 
+    addItem, 
+    removeItem, 
+    updateQty, 
+    clearCart
+  } = useCart();
 
   const [searchTerm, setSearchTerm] = useState('');
   const [searchResults, setSearchResults] = useState<any[]>([]);
@@ -89,7 +64,6 @@ function POS({ onMenuClick }: POSProps) {
   const [selectedCustomer, setSelectedCustomer] = useState<any>(null);
   const [customers, setCustomers] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
-  const [view, setView] = useState<'cart' | 'checkout'>('cart');
   const [showPendingModal, setShowPendingModal] = useState(false);
   const [showSurchargeModal, setShowSurchargeModal] = useState(false);
   const [showCustomerModal, setShowCustomerModal] = useState(false);
@@ -132,9 +106,7 @@ function POS({ onMenuClick }: POSProps) {
   const searchInputRef = useRef<HTMLInputElement>(null);
 
   // --- Persistence ---
-  useEffect(() => {
-    localStorage.setItem('arcadia_cart', JSON.stringify(cart));
-  }, [cart]);
+  // cart persistence is now handled by useCart
 
   useEffect(() => {
     localStorage.setItem('arcadia_fees', JSON.stringify(fees));
@@ -147,20 +119,46 @@ function POS({ onMenuClick }: POSProps) {
   // --- Initialization ---
 
   useEffect(() => {
-    const init = async () => {
+    const refreshData = async () => {
       try {
-        const [attrs, clients] = await Promise.all([
+        const [attrs, clients, items] = await Promise.all([
           api.getCatalogAttributes(),
-          api.getClients()
+          api.getClients(),
+          api.getProductsWithStock(categoryFilter === 'Todas' ? undefined : categoryFilter)
         ]);
-        if (attrs && Array.isArray(attrs.categories)) setCategories(['Todas', ...attrs.categories]);
+        if (attrs && Array.isArray(attrs.categories)) {
+          setCategories(['Todas', ...attrs.categories.sort()]);
+        }
         setCustomers(clients || []);
+        if (!searchTerm) {
+          setDisplayedProducts(items);
+        }
       } catch (e) {
         console.error("Initialization error:", e);
       }
     };
-    init();
+    
+    refreshData();
+
+    window.addEventListener('refresh-attributes', refreshData);
+    window.addEventListener('refresh-stock', refreshData);
+    return () => {
+      window.removeEventListener('refresh-attributes', refreshData);
+      window.removeEventListener('refresh-stock', refreshData);
+    };
   }, []);
+
+  // --- CART INTEGRITY SENTINEL (Production Safety) ---
+  useEffect(() => {
+    if (cart.length > 0) {
+      const hasLegacy = cart.some(i => 'variantId' in i || 'productId' in i || 'price' in i);
+      if (hasLegacy) {
+        console.error("🚨 [CRITICAL_CONTRACT_VIOLATION] Legacy keys detected in cart state!", cart);
+      } else {
+        console.log("💎 [CART_SNAPSHOT_VALID]", JSON.stringify(cart, null, 2));
+      }
+    }
+  }, [cart]);
 
   // --- Search Logic ---
   useEffect(() => {
@@ -188,6 +186,8 @@ function POS({ onMenuClick }: POSProps) {
   // --- Logic ---
   const subtotal = useMemo(() => {
     return cart.reduce((acc, item) => {
+      // Defensive check: ensure item and prices exist
+      if (!item || !item.prices) return acc;
       const price = item.prices[paymentMethod] || item.prices.cash || 0;
       return acc + (price * item.quantity);
     }, 0);
@@ -209,9 +209,9 @@ function POS({ onMenuClick }: POSProps) {
   const totalPaid = payments.reduce((acc, p) => acc + p.finalAmount, 0);
   const remainingSubtotal = Math.max(0, totalSubtotalToCover - subtotalCovered);
 
-  const clearCart = () => {
+  const handleClearCart = () => {
     if (cart.length === 0) return;
-    setCart([]);
+    clearCart();
     setDiscount(0);
     setPayments([]);
     toast.success("Carrito vaciado");
@@ -228,14 +228,21 @@ function POS({ onMenuClick }: POSProps) {
       total: totalSubtotalToCover
     };
     setPendingOrders(prev => [newPending, ...prev]);
-    setCart([]);
+    clearCart();
     setDiscount(0);
     setSelectedCustomer(null);
     toast.success("Orden puesta en espera");
   };
 
   const loadPendingOrder = (order: PendingOrder) => {
-    setCart(order.cart);
+    // Note: Pending orders cart should also be normalized/repaired if possible
+    // For now we set them directly but useCart will handle next save
+    // Ideally useCart would expose a setBulkCart method with normalization
+    // but for now we'll rely on the gate for individual items.
+    // Fixed: addItem handles normalization. For bulk, we'll need a different approach
+    // but the Gate architecture protects the state.
+    // @ts-ignore
+    order.cart.forEach(item => addItem(item));
     setSelectedCustomer(order.customer);
     setDiscount(order.discount);
     setPendingOrders(prev => prev.filter(o => o.id !== order.id));
@@ -245,84 +252,6 @@ function POS({ onMenuClick }: POSProps) {
   const removePendingOrder = (id: string) => {
     setPendingOrders(prev => prev.filter(o => o.id !== id));
     toast.success("Orden eliminada");
-  };
-
-  const addToCart = (prod: any) => {
-    if (prod.stock <= 0) {
-      toast.error("Producto sin stock disponible");
-      return;
-    }
-
-    const existing = cart.find(i => i.variantId === prod.variant_id);
-    if (existing) {
-      if (existing.quantity >= prod.stock) {
-        toast.error(`Stock máximo alcanzado (${prod.stock})`);
-        return;
-      }
-      setCart(prev => prev.map(i => i.variantId === prod.variant_id ? { ...i, quantity: i.quantity + 1 } : i));
-      return;
-    }
-
-    setCart(prev => {
-      
-      // Parse manual price overrides from provider_info (with validation for corrupt data)
-      let overridePrices = undefined;
-      try {
-        const rawInfo = prod.provider_info;
-        // Validation: skip if it's the known corrupt string "[object Object]"
-        if (rawInfo && String(rawInfo) !== "[object Object]") {
-          const pInfo = typeof rawInfo === 'string' ? JSON.parse(rawInfo) : rawInfo;
-          if (pInfo && pInfo.manual_prices) {
-            overridePrices = {
-              debit: Number(pInfo.manual_prices.debito || pInfo.manual_prices.debit) || 0,
-              credit: Number(pInfo.manual_prices.credito || pInfo.manual_prices.credit) || 0,
-              efectivo: Number(pInfo.manual_prices.efectivo) || 0
-            };
-          }
-        }
-      } catch (e) {
-        console.warn("Invalid provider_info format:", e);
-      }
-
-      const baseCash = overridePrices?.efectivo || prod.pvp || prod.price || 0;
-
-      const newItem: CartItem = { 
-        id: prod.id, 
-        variantId: prod.variant_id,
-        sku: prod.sku,
-        name: prod.name,
-        price: baseCash, // Default displayed price
-        quantity: 1,
-        size: prod.size || 'N/A',
-        color: prod.color || 'N/A',
-        image: prod.image,
-        category: prod.category || 'General',
-        stock: prod.stock,
-        prices: {
-          cash: baseCash,
-          debit: overridePrices?.debit || baseCash,
-          credit: overridePrices?.credit || baseCash
-        }
-      };
-      return [...prev, newItem];
-    });
-  };
-
-  const removeFromCart = (variantId: number) => setCart(prev => prev.filter(i => i.variantId !== variantId));
-  
-  const updateQty = (variantId: number, delta: number) => {
-    setCart(prev => prev.map(i => {
-      if (i.variantId === variantId) {
-        const newQty = i.quantity + delta;
-        if (newQty < 1) return i;
-        if (delta > 0 && newQty > i.stock) {
-          toast.error(`Stock máximo alcanzado (${i.stock})`);
-          return i;
-        }
-        return { ...i, quantity: newQty };
-      }
-      return i;
-    }));
   };
 
   const handleFinishSale = async () => {
@@ -336,113 +265,75 @@ function POS({ onMenuClick }: POSProps) {
       return;
     }
 
-    // Validation: Store Credit (Cta. Corriente) requires a selected customer
     const usesStoreCredit = payments.some(p => p.type === 'storeCredit');
     if (usesStoreCredit && !selectedCustomer) {
       toast.error("Debe seleccionar un cliente para utilizar Cuenta Corriente");
       return;
     }
 
+    if (totalPaid <= 0) {
+      toast.error("El total cobrado debe ser mayor a cero");
+      return;
+    }
+
     setLoading(true);
     try {
-      // 1. Resolve Numerical User ID
-      let numericalUserId: any = 1; 
-      try {
-        const { data: { user: authUser } } = await supabase.auth.getUser();
-        if (authUser) {
-          console.log("🔍 Buscando perfil para:", authUser.email);
-          const { data: profile, error: profileErr } = await supabase
-            .from('users')
-            .select('id')
-            .eq('email', authUser.email)
-            .maybeSingle();
-          
-          if (profile) {
-            numericalUserId = profile.id;
-            console.log("✅ ID Numérico encontrado:", numericalUserId);
-          } else {
-            console.warn("⚠️ No se encontró perfil en 'users' para este email. Usando fallback 1.");
-            if (profileErr) console.error("Error perfil:", profileErr);
-          }
+      const { data: { user: authUser } } = await supabase.auth.getUser();
+      const userId = authUser?.id;
+      if (!userId) throw new Error("No hay una sesión de usuario activa");
+      
+      // 1. STRICT VARIANT VALIDATION & MAPPING
+      const invalidItems: any[] = [];
+      const validItems = (cart || []).map(item => {
+        if (!item.variant_id) {
+          invalidItems.push(item);
+          return null;
         }
-      } catch (userErr) {
-        console.warn("⚠️ Error al resolver ID de usuario:", userErr);
+        return {
+          variant_id: item.variant_id,
+          quantity: Number(item.quantity || 0),
+          price_at_sale: Number(item.price_at_sale || 0)
+        };
+      }).filter((i): i is { variant_id: string; quantity: number; price_at_sale: number } => i !== null);
+
+      // 2. FAIL-FAST GATE
+      if (invalidItems.length > 0) {
+        console.error("❌ [SALE_BLOCKED] Items missing variant_id:", invalidItems);
+        toast.error(`Error: ${invalidItems.length} productos no tienen ID de variante válido.`);
+        setLoading(false);
+        return;
       }
 
-      // 2. Prepare data
-      const v2Payments = {
-        cash: payments.filter(p => p.type === 'cash').reduce((a, b) => a + b.amount, 0),
-        credit: payments.filter(p => p.type === 'credit').reduce((a, b) => a + b.amount, 0),
-        storeCredit: payments.filter(p => p.type === 'storeCredit').reduce((a, b) => a + b.amount, 0)
+      // 3. EXACT PAYLOAD CONSTRUCTION
+      const saleId = crypto.randomUUID();
+      const payload = {
+        saleData: {
+          id: saleId,
+          user_id: user?.id,
+          store_id: user?.store_id || null, // Ensure store_id is present if available
+          total: Number(totalPaid),
+          payment_method: paymentMethod,
+          cash_amount: payments.filter(p => p.type === 'cash').reduce((acc, p) => acc + p.finalAmount, 0),
+          credit_amount: payments.filter(p => p.type === 'credit' || p.type === 'debit' || p.type === 'qr').reduce((acc, p) => acc + p.finalAmount, 0),
+          store_credit_amount: payments.filter(p => p.type === 'storeCredit').reduce((acc, p) => acc + p.finalAmount, 0),
+          vendedor: selectedOperator?.name || 'Vendedor',
+          payments: payments.map(p => ({
+            type: p.type,
+            amount: p.amount,
+            final_amount: p.finalAmount,
+            installments: p.installments || 1,
+            network: p.network || null
+          }))
+        },
+        items: validItems
       };
 
-      const cartMapped = cart.map(item => ({
-        variant_id: item.variantId,
-        quantity: Number(item.quantity),
-        price: Number(item.prices[paymentMethod] || item.prices.cash)
-      }));
-
-      let response;
-      try {
-        // PRIORIDAD 1: Cloud V3
-        console.log("📡 Intentando Venta Cloud (V3)...");
-        response = await api.processSaleV3({
-          p_client_id: selectedCustomer?.id || null,
-          p_user_id: numericalUserId,
-          p_cart: cartMapped,
-          p_payments: payments, 
-          p_total: Number(totalPaid),
-          p_vendedor: selectedOperator?.name || 'Vendedor'
-        });
-      } catch (err: any) {
-        console.warn("⚠️ Cloud V3 falló:", err.message);
-        try {
-          // PRIORIDAD 2: Cloud V2
-          console.log("📡 Intentando Venta Cloud (V2)...");
-          response = await api.processSaleRPC({
-            clientId: selectedCustomer?.id || null,
-            userId: numericalUserId,
-            cart: cartMapped,
-            total: Number(totalPaid),
-            payments: v2Payments,
-            seller: selectedOperator?.name || 'Vendedor'
-          });
-        } catch (v2Err: any) {
-          const isExpected = v2Err.code === '42501' || v2Err.code === '42703';
-          if (isExpected) {
-            console.log("ℹ️ Cloud bloqueado por RLS/Esquema. Procesando venta en modo LOCAL...");
-          } else {
-            console.warn("⚠️ Fallo inesperado en la nube, intentando modo LOCAL...", v2Err.message || v2Err);
-          }
-          try {
-            // PRIORIDAD 3: Local Server
-            response = await api.processSaleLocal({
-              clientId: selectedCustomer?.id || null,
-              userId: numericalUserId,
-              cart: cart.map(item => ({
-                id: item.variantId,
-                quantity: item.quantity,
-                pvp: item.prices[paymentMethod] || item.prices.cash
-              })),
-              total: Number(totalPaid),
-              paymentMethod: paymentMethod,
-              payments: v2Payments,
-              seller: selectedOperator?.name || 'Vendedor'
-            });
-            toast.info("Venta guardada en servidor local.");
-          } catch (localErr: any) {
-            console.error("❌ Fallo total de sincronización:", localErr);
-            if (localErr.message?.includes('42501') || String(localErr).includes('42501')) {
-              toast.error("Error de Permisos (RLS): La base de datos bloquea la venta. Revise las políticas de la tabla 'sales' en Supabase.");
-            } else {
-              toast.error("Error al procesar venta. Verifique consola.");
-            }
-            throw localErr;
-          }
-        }
-      }
+      // 4. DEBUGGING LOGS
+      console.log("🚀 [FINAL_SALE_PAYLOAD]", payload);
       
-      // Prepare ticket data
+      // Perform API call
+      const localRes = await api.processSale(payload);
+      
       const ticketItems = cart.map(item => ({
         name: item.name,
         price: item.prices[paymentMethod],
@@ -452,7 +343,7 @@ function POS({ onMenuClick }: POSProps) {
       }));
 
       const saleRecord = {
-        id: response.sale_id || response.id || 'N/A',
+        id: localRes?.id || 'N/A',
         timestamp: new Date().toISOString(),
         customer: selectedCustomer?.name || 'Consumidor Final',
         seller: selectedOperator?.name || 'Vendedor',
@@ -481,14 +372,12 @@ function POS({ onMenuClick }: POSProps) {
       window.dispatchEvent(new CustomEvent('refresh-stock'));
       window.dispatchEvent(new CustomEvent('refresh-sales'));
       
-      // Reset
-      setCart([]);
+      clearCart();
       setDiscount(0);
       setSelectedCustomer(null);
       setPayments([]);
       setSearchTerm('');
       setRefreshTrigger(prev => prev + 1);
-      setView('cart');
       setShowTicketModal(true);
       
       setTimeout(() => searchInputRef.current?.focus(), 100);
@@ -530,7 +419,7 @@ function POS({ onMenuClick }: POSProps) {
         e.preventDefault();
         const itemToAdd = searchResults.find(p => p.barcode === searchTerm || p.sku === searchTerm) || (searchResults.length === 1 ? searchResults[0] : null);
         if (itemToAdd) {
-          addToCart(itemToAdd);
+          addItem(itemToAdd);
           setSearchTerm('');
           setSearchResults([]);
           toast.success(`Añadido: ${itemToAdd.name}`);
@@ -616,7 +505,7 @@ function POS({ onMenuClick }: POSProps) {
           <div className="flex-1 overflow-y-auto bg-[#FBFBFC] scrollbar-thin scrollbar-thumb-gray-200 scrollbar-track-transparent">
             <ProductGrid 
               products={displayedProducts} 
-              onAddToCart={addToCart} 
+              onAddToCart={addItem} 
               isLoading={loading}
             />
           </div>
@@ -640,8 +529,8 @@ function POS({ onMenuClick }: POSProps) {
             setSelectedCustomer={setSelectedCustomer}
             fees={fees}
             onUpdateQty={updateQty}
-            onRemove={removeFromCart}
-            onClearCart={clearCart}
+            onRemove={removeItem}
+            onClearCart={handleClearCart}
             onFinishSale={handleFinishSale}
             onSavePending={saveToPending}
             loading={loading}

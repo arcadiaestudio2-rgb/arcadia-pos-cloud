@@ -22,19 +22,31 @@ import {
   Zap,
   Save,
   Globe,
-  Clock
+  Clock,
+  User,
+  UserPlus
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { toast } from '../common/CommonUI';
 import { api } from '../../services/api';
+import { useOperator } from '../../context/OperatorContext';
 
 const TABS = [
   { id: 'finance', label: 'Estrategia & Inflación', icon: TrendingUp },
   { id: 'payments', label: 'Matriz de Cobro', icon: CreditCard },
   { id: 'inventory', label: 'Diccionario & Stock', icon: Database },
   { id: 'security', label: 'Terminales & Seguridad', icon: ShieldCheck },
+  { id: 'staff', label: 'Personal & Operadores', icon: UserPlus },
   { id: 'automation', label: 'WhatsApp & Backups', icon: Smartphone },
 ];
+
+const DEFAULT_ATTRIBUTES: any = {
+  brands: ['Alpine Pro', 'Luxe Core', 'Zen Tech', 'Nordic Edge'],
+  seasons: ['INV 24', 'VER 24', 'CONT', 'PRE-FA'],
+  alpha: ['XS', 'S', 'M', 'L', 'XL', 'XXL'],
+  numeric: ['34', '35', '36', '37', '38', '39', '40', '41', '42', '43', '44', '45'],
+  colors: ['Negro', 'Blanco', 'Azul Marino', 'Gris Melange', 'Beige', 'Bordeaux', 'Verde Militar'],
+};
 
 export function POSSettings() {
   const [activeTab, setActiveTab] = useState('finance');
@@ -90,6 +102,7 @@ export function POSSettings() {
               {activeTab === 'payments' && <TabPayments key="payments" />}
               {activeTab === 'inventory' && <TabInventory key="inventory" />}
               {activeTab === 'security' && <TabSecurity key="security" />}
+              {activeTab === 'staff' && <TabStaff key="staff" />}
               {activeTab === 'automation' && <TabAutomation key="automation" />}
            </AnimatePresence>
         </main>
@@ -243,6 +256,36 @@ function TabPayments() {
 
 // --- SUB-COMPONENTS: INVENTORY ---
 function TabInventory() {
+  const [dbAttributes, setDbAttributes] = useState(() => {
+    const saved = localStorage.getItem('arcadia_catalog_attributes');
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch (e) {
+        return DEFAULT_ATTRIBUTES;
+      }
+    }
+    return DEFAULT_ATTRIBUTES;
+  });
+
+  const addAttr = (type: string) => {
+    const val = prompt(`Nuevo ${type.slice(0, -1)}:`);
+    if (val && val.trim()) {
+      const updated = { ...dbAttributes, [type]: [...(dbAttributes[type] || []), val.trim()] };
+      setDbAttributes(updated);
+      localStorage.setItem('arcadia_catalog_attributes', JSON.stringify(updated));
+      toast.success('Agregado');
+    }
+  };
+
+  const removeAttr = (type: string, val: string) => {
+    if (!confirm(`¿Eliminar ${val}?`)) return;
+    const updated = { ...dbAttributes, [type]: dbAttributes[type].filter((v: string) => v !== val) };
+    setDbAttributes(updated);
+    localStorage.setItem('arcadia_catalog_attributes', JSON.stringify(updated));
+    toast.success('Eliminado');
+  };
+
   return (
     <motion.div initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} className="space-y-12">
        <div className="grid grid-cols-2 gap-10">
@@ -250,25 +293,45 @@ function TabInventory() {
              <div className="space-y-10 mt-8">
                 <div className="space-y-4">
                    <div className="flex justify-between items-center">
-                      <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">Curva de Talles (General)</label>
-                      <button className="p-1 bg-slate-50 rounded-lg text-primary hover:bg-primary hover:text-white transition-all"><Plus size={14} /></button>
+                      <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">Curva de Talles (Alpha)</label>
+                      <button onClick={() => addAttr('alpha')} className="p-1 bg-slate-50 rounded-lg text-primary hover:bg-primary hover:text-white transition-all"><Plus size={14} /></button>
                    </div>
                    <div className="flex flex-wrap gap-2">
-                      {['XS', 'S', 'M', 'L', 'XL', 'XXL', '35', '36', '37', '38', '39', '40'].map(t => (
-                        <span key={t} className="px-3 py-1 bg-slate-100 rounded-lg text-[10px] font-black text-slate-500 uppercase">{t}</span>
+                      {dbAttributes.alpha.map((t: string) => (
+                        <div key={t} className="flex items-center gap-1.5 px-3 py-1 bg-slate-100 rounded-lg group">
+                           <span className="text-[10px] font-black text-slate-500 uppercase">{t}</span>
+                           <button onClick={() => removeAttr('alpha', t)} className="opacity-0 group-hover:opacity-100 text-slate-400 hover:text-error transition-all"><Trash2 size={10} /></button>
+                        </div>
                       ))}
                    </div>
                 </div>
+
+                <div className="space-y-4">
+                   <div className="flex justify-between items-center">
+                      <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">Curva de Talles (Numérica)</label>
+                      <button onClick={() => addAttr('numeric')} className="p-1 bg-slate-50 rounded-lg text-primary hover:bg-primary hover:text-white transition-all"><Plus size={14} /></button>
+                   </div>
+                   <div className="flex flex-wrap gap-2">
+                      {dbAttributes.numeric.map((t: string) => (
+                        <div key={t} className="flex items-center gap-1.5 px-3 py-1 bg-slate-100 rounded-lg group">
+                           <span className="text-[10px] font-black text-slate-500 uppercase">{t}</span>
+                           <button onClick={() => removeAttr('numeric', t)} className="opacity-0 group-hover:opacity-100 text-slate-400 hover:text-error transition-all"><Trash2 size={10} /></button>
+                        </div>
+                      ))}
+                   </div>
+                </div>
+
                 <div className="space-y-4">
                    <div className="flex justify-between items-center">
                       <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">Paleta de Colores</label>
-                      <button className="p-1 bg-slate-50 rounded-lg text-primary hover:bg-primary hover:text-white transition-all"><Plus size={14} /></button>
+                      <button onClick={() => addAttr('colors')} className="p-1 bg-slate-50 rounded-lg text-primary hover:bg-primary hover:text-white transition-all"><Plus size={14} /></button>
                    </div>
                    <div className="flex flex-wrap gap-2">
-                      {['Negro', 'Blanco', 'Azul Marino', 'Rojo Alpine', 'Gris Melange'].map(c => (
-                        <div key={c} className="flex items-center gap-2 px-3 py-1 bg-slate-100 rounded-lg">
-                           <div className="w-2 h-2 rounded-full bg-on-surface" />
+                      {dbAttributes.colors.map((c: string) => (
+                        <div key={c} className="flex items-center gap-2 px-3 py-1 bg-slate-100 rounded-lg group">
+                           <div className="w-2 h-2 rounded-full bg-slate-400" />
                            <span className="text-[10px] font-black text-slate-500 uppercase">{c}</span>
+                           <button onClick={() => removeAttr('colors', c)} className="opacity-0 group-hover:opacity-100 text-slate-400 hover:text-error transition-all"><Trash2 size={10} /></button>
                         </div>
                       ))}
                    </div>
@@ -346,6 +409,113 @@ function TabSecurity() {
                       <option>30 Minutos</option>
                       <option>Nunca</option>
                    </select>
+                </div>
+             </div>
+          </div>
+       </div>
+    </motion.div>
+  );
+}
+
+// --- SUB-COMPONENTS: STAFF ---
+function TabStaff() {
+  const { operators, setOperators } = useOperator();
+  const [newName, setNewName] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  const handleCreate = async () => {
+    if (!newName.trim()) return;
+    setLoading(true);
+    try {
+      const op = await api.createOperator({ name: newName.trim(), role: 'vendedor' });
+      setOperators([...operators, op]);
+      setNewName('');
+      toast.success('Operador creado correctamente');
+    } catch (e: any) {
+      toast.error(e.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleDelete = async (id: string) => {
+    if (!confirm('¿Seguro que deseas eliminar este operador?')) return;
+    try {
+      await api.deleteOperator(id);
+      setOperators(operators.filter(o => o.id !== id));
+      toast.success('Operador eliminado');
+    } catch (e: any) {
+      toast.error(e.message);
+    }
+  };
+
+  return (
+    <motion.div initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} className="space-y-12">
+       <div className="grid grid-cols-2 gap-10">
+          <div className="space-y-8">
+             <div className="flex items-center gap-3">
+                <UserPlus size={20} className="text-primary" />
+                <h3 className="text-sm font-black uppercase tracking-widest text-on-surface">Gestión de Personal</h3>
+             </div>
+             
+             <div className="p-8 bg-white border border-slate-100 rounded-[2.5rem] shadow-sm space-y-6">
+                <div className="space-y-4">
+                   <label className="text-[10px] font-black uppercase tracking-widest text-slate-400">Nuevo Operador</label>
+                   <div className="flex gap-2">
+                      <input 
+                        type="text" 
+                        placeholder="Nombre del operador..."
+                        className="flex-1 h-14 bg-slate-50 border-none rounded-2xl px-6 text-sm font-bold focus:ring-4 focus:ring-primary/5 transition-all"
+                        value={newName}
+                        onChange={(e) => setNewName(e.target.value)}
+                      />
+                      <button 
+                        onClick={handleCreate}
+                        disabled={loading || !newName.trim()}
+                        className="w-14 h-14 bg-on-surface text-white rounded-2xl flex items-center justify-center hover:scale-105 transition-all disabled:opacity-50"
+                      >
+                         {loading ? <RefreshCw size={18} className="animate-spin" /> : <Plus size={24} />}
+                      </button>
+                   </div>
+                </div>
+
+                <div className="space-y-3">
+                   {operators.map(op => (
+                      <div key={op.id} className="flex items-center justify-between p-4 bg-slate-50 rounded-2xl group hover:bg-white hover:shadow-lg transition-all border border-transparent hover:border-slate-100">
+                         <div className="flex items-center gap-4">
+                            <div className="w-10 h-10 bg-white rounded-xl flex items-center justify-center text-slate-400 group-hover:bg-primary group-hover:text-white transition-all">
+                               <User size={18} />
+                            </div>
+                            <div>
+                               <p className="text-xs font-black uppercase text-on-surface">{op.name}</p>
+                               <p className="text-[9px] font-bold text-slate-400 uppercase tracking-widest">{op.role}</p>
+                            </div>
+                         </div>
+                         <button 
+                            onClick={() => handleDelete(op.id)}
+                            className="w-10 h-10 flex items-center justify-center rounded-xl text-slate-300 hover:text-error hover:bg-error/5 transition-all"
+                         >
+                            <Trash2 size={18} />
+                         </button>
+                      </div>
+                   ))}
+                </div>
+             </div>
+          </div>
+
+          <div className="space-y-8">
+             <div className="flex items-center gap-3">
+                <ShieldCheck size={20} className="text-tertiary" />
+                <h3 className="text-sm font-black uppercase tracking-widest text-on-surface">Aislamiento & Roles</h3>
+             </div>
+             <div className="p-10 bg-on-surface rounded-[3rem] text-white space-y-6 shadow-2xl shadow-on-surface/20">
+                <p className="text-xs font-medium text-white/50 uppercase leading-relaxed italic">
+                   "Cada operador creado aquí pertenece únicamente a tu sucursal. Los movimientos de stock, ventas y tickets quedarán firmados con el nombre del operador seleccionado en la cabecera."
+                </p>
+                <div className="flex flex-wrap gap-2 pt-4">
+                   <span className="px-4 py-2 bg-white/10 rounded-xl text-[9px] font-black uppercase tracking-widest">Admin (Total)</span>
+                   <span className="px-4 py-2 bg-white/10 rounded-xl text-[9px] font-black uppercase tracking-widest">Vendedor (Ventas)</span>
+                   <span className="px-4 py-2 bg-white/10 rounded-xl text-[9px] font-black uppercase tracking-widest">Cajero (Caja)</span>
                 </div>
              </div>
           </div>

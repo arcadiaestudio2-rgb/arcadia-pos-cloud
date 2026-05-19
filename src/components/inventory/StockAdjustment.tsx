@@ -72,7 +72,7 @@ export function StockAdjustment() {
         selectedProduct.id,
         absQuantity,
         type,
-        observations || `Ajuste manual: ${reasonLabel}`,
+        observations,
         reasonLabel
       );
 
@@ -166,7 +166,7 @@ export function StockAdjustment() {
                        <h4 className="text-sm font-black text-on-surface leading-tight uppercase">{selectedProduct.name || selectedProduct.products?.name}</h4>
                        <div className="flex items-center gap-2 mt-2">
                           <span className="text-[10px] font-black text-slate-300 uppercase tracking-widest">Stock Operativo:</span>
-                          <span className={`text-xs font-black ${selectedProduct.stock < (selectedProduct.stock_minimo || 5) ? 'text-error' : 'text-tertiary'}`}>
+                          <span className={`text-xs font-black ${selectedProduct.stock < (selectedProduct.stockMinimo || 5) ? 'text-error' : 'text-tertiary'}`}>
                              {selectedProduct.stock} u.
                           </span>
                        </div>

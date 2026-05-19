@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { 
   Search, 
   Filter, 
@@ -36,6 +36,11 @@ export function CatalogTable() {
 
   useEffect(() => {
     loadProducts();
+    
+    window.addEventListener('refresh-stock', loadProducts);
+    return () => {
+      window.removeEventListener('refresh-stock', loadProducts);
+    };
   }, []);
 
 
@@ -114,7 +119,7 @@ export function CatalogTable() {
                <tr><td colSpan={6} className="p-10 text-center text-slate-300 font-bold uppercase tracking-widest">No se encontraron productos</td></tr>
             ) : filteredProducts.map((p) => {
               const totalStock = p.total_stock || 0;
-              const totalMinStock = p.total_stock_minimo || 5; // Fallback to 5 if not set
+              const totalMinStock = p.stockMinimo || 5; // Fallback to 5 if not set
               const isOutOfStock = totalStock <= 0;
               const isLowStock = totalStock <= totalMinStock && !isOutOfStock;
 

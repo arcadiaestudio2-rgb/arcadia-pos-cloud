@@ -128,19 +128,19 @@ async function startServer() {
         }
       }),
       transaction: async (callback: (trx: any) => Promise<any>) => {
-        sqlite.prepare('BEGIN').run();
+        const trx = {
+          prepare: (sql: string) => ({
+            get: async (params: any[] = []) => sqlite.prepare(sql).get(...params),
+            all: async (params: any[] = []) => sqlite.prepare(sql).all(...params),
+            run: async (params: any[] = []) => {
+              const info = sqlite.prepare(sql).run(...params);
+              return { lastInsertRowid: info.lastInsertRowid, changes: info.changes };
+            }
+          }),
+          query: async (sql: string, params: any[]) => ({ rows: sqlite.prepare(sql).all(...params) })
+        };
         try {
-          const trx = {
-            prepare: (sql: string) => ({
-              get: async (params: any[] = []) => sqlite.prepare(sql).get(...params),
-              all: async (params: any[] = []) => sqlite.prepare(sql).all(...params),
-              run: async (params: any[] = []) => {
-                const info = sqlite.prepare(sql).run(...params);
-                return { lastInsertRowid: info.lastInsertRowid, changes: info.changes };
-              }
-            }),
-            query: async (sql: string, params: any[]) => ({ rows: sqlite.prepare(sql).all(...params) })
-          };
+          sqlite.prepare('BEGIN').run();
           const result = await callback(trx);
           sqlite.prepare('COMMIT').run();
           return result;
@@ -176,14 +176,18 @@ async function startServer() {
       base_margin REAL DEFAULT 60,
       provider_info TEXT,
       status TEXT DEFAULT 'active',
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      store_id TEXT,
+      user_id INTEGER,
+      FOREIGN KEY (user_id) REFERENCES users(id)
     );
 
     CREATE TABLE IF NOT EXISTS catalog_attributes (
       id ${isPostgres ? 'SERIAL' : 'INTEGER'} PRIMARY KEY ${isPostgres ? '' : 'AUTOINCREMENT'},
       type TEXT NOT NULL,
       value TEXT NOT NULL,
-      UNIQUE(type, value)
+      store_id TEXT,
+      UNIQUE(type, value, store_id)
     );
 
     CREATE TABLE IF NOT EXISTS variants (
@@ -197,7 +201,10 @@ async function startServer() {
       margin REAL,
       pvp REAL,
       stock_minimo INTEGER DEFAULT 0,
-      FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
+      store_id TEXT,
+      user_id INTEGER,
+      FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE,
+      FOREIGN KEY (user_id) REFERENCES users(id)
     );
 
     CREATE TABLE IF NOT EXISTS clients (
@@ -206,7 +213,10 @@ async function startServer() {
       dni_tax_id TEXT UNIQUE NOT NULL,
       phone TEXT,
       debt_balance REAL DEFAULT 0,
-      credit_limit REAL DEFAULT 20000
+      credit_limit REAL DEFAULT 20000,
+      store_id TEXT,
+      user_id INTEGER,
+      FOREIGN KEY (user_id) REFERENCES users(id)
     );
 
     CREATE TABLE IF NOT EXISTS sales (
@@ -220,6 +230,7 @@ async function startServer() {
       cash_amount REAL DEFAULT 0,
       credit_amount REAL DEFAULT 0,
       store_credit_amount REAL DEFAULT 0,
+      store_id TEXT,
       status TEXT DEFAULT 'active',
       void_reason TEXT,
       voided_at TIMESTAMP,
@@ -247,6 +258,7 @@ async function startServer() {
       reason TEXT,
       evento_id TEXT,
       payload_json TEXT,
+      store_id TEXT,
       is_annulled INTEGER DEFAULT 0,
       timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (variant_id) REFERENCES variants(id),
@@ -371,6 +383,34 @@ async function startServer() {
           await db.exec(`ALTER TABLE stock_movements ADD COLUMN ${col.name} ${col.type}`);
         }
       } catch (e) { /* Column might exist */ }
+    }
+
+    const multiTenantTables = [
+      'products', 'variants', 'clients', 'sales', 
+      'stock_movements', 'catalog_attributes'
+    ];
+
+    for (const table of multiTenantTables) {
+      try {
+        if (isPostgres) {
+          await db.exec(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS store_id TEXT`);
+        } else {
+          await db.exec(`ALTER TABLE ${table} ADD COLUMN store_id TEXT`);
+        }
+        console.log(`✅ [Migration] Columna store_id añadida a ${table}`);
+      } catch (e) { /* Column might exist */ }
+    }
+
+    // Generic user_id migration for critical tables
+    const userTrackedTables = ['products', 'variants', 'clients'];
+    for (const table of userTrackedTables) {
+      try {
+        if (isPostgres) {
+          await db.exec(`ALTER TABLE ${table} ADD COLUMN IF NOT EXISTS user_id INTEGER`);
+        } else {
+          await db.exec(`ALTER TABLE ${table} ADD COLUMN user_id INTEGER`);
+        }
+      } catch (e) {}
     }
   };
   await applyMigrations();

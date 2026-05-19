@@ -9,7 +9,8 @@ import {
   TrendingUp,
   Warehouse,
   ChevronRight,
-  X
+  X,
+  Users
 } from 'lucide-react';
 import { BrandBlock } from './common/CommonUI';
 import { AnimatePresence, motion } from 'motion/react';
@@ -27,6 +28,7 @@ const navItems = [
   { id: 'inventory', label: 'Gestión Maestra', icon: Warehouse },
   { id: 'pos', label: 'POS', icon: ShoppingCart },
   { id: 'history', label: 'Histórico', icon: History },
+  { id: 'operators', label: 'Operadores', icon: Users },
   { id: 'config', label: 'Configuración', icon: Settings },
   { id: 'profile', label: 'Perfil', icon: User },
 ];

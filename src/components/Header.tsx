@@ -1,19 +1,15 @@
 import React from 'react';
-import { Search, Bell, ChevronDown, Menu, ShieldAlert } from 'lucide-react';
+import { Bell, Menu } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useAuth } from '../context/AuthContext';
 import { OperatorSelector } from './Header/OperatorSelector';
 import { api } from '../services/api';
+import { SyncStatus } from './common/SyncStatus';
+import { InstallButton } from './common/InstallButton';
 
 interface HeaderProps {
   onMenuClick?: () => void;
 }
-
-const ROLE_LABELS: Record<string, string> = {
-  'admin': 'Administrador',
-  'stock-manager': 'Carga de Stock',
-  'seller': 'Vendedor'
-};
 
 export function Header({ onMenuClick }: HeaderProps) {
   const { user } = useAuth();
@@ -46,6 +42,9 @@ export function Header({ onMenuClick }: HeaderProps) {
             </span>
           </div>
         )}
+        
+        <SyncStatus />
+        <InstallButton />
       </div>
 
       <div className="flex items-center gap-2 lg:gap-4">

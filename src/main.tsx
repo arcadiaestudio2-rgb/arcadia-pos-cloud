@@ -4,8 +4,14 @@ import App from './App.tsx';
 import './index.css';
 import { AuthProvider } from './context/AuthContext';
 import { OperatorProvider } from './context/OperatorContext';
+import { registerSW } from 'virtual:pwa-register';
+import { initAppRealtime } from './realtime/realtimeBootstrap';
 
-// localStorage.clear(); // REMOVED: This was causing session loss on every reload
+// Register PWA Service Worker
+registerSW({ immediate: true });
+
+// Initialize Realtime Deterministic Pipeline (Bootstrap)
+initAppRealtime();
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>

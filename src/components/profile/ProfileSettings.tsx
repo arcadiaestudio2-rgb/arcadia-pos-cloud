@@ -195,50 +195,23 @@ function TabBranding() {
 }
 
 function TabSecurity() {
-  const [users] = useState([
-    { name: 'Gabi Admin', role: 'admin', email: 'gabi@arcadia.app', status: 'active' },
-    { name: 'Lucas Ventas', role: 'seller', email: 'lucas@arcadia.app', status: 'active' },
-    { name: 'Sofia Shop', role: 'manager', email: 'sofia@arcadia.app', status: 'inactive' },
-  ]);
-
   return (
-    <motion.div initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} className="space-y-12">
-       <div className="flex justify-between items-center">
-          <div className="flex items-center gap-3">
-             <Shield size={20} className="text-primary" />
-             <h3 className="text-sm font-black uppercase tracking-widest text-on-surface">Usuarios & Permisos</h3>
-          </div>
-          <button className="flex items-center gap-2 px-6 py-2 bg-on-surface text-white text-[10px] font-black rounded-xl uppercase tracking-widest shadow-lg">
-             <Plus size={16} /> Agregar Empleado
-          </button>
+    <motion.div initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} className="flex flex-col items-center justify-center py-20 space-y-6">
+       <div className="w-20 h-20 bg-primary/10 rounded-[2rem] flex items-center justify-center text-primary">
+          <Shield size={40} />
        </div>
-
-       <div className="space-y-4">
-          {users.map(u => (
-            <div key={u.email} className="flex items-center justify-between p-6 bg-slate-50 border border-slate-100 rounded-3xl group hover:bg-white hover:shadow-xl hover:shadow-slate-200/50 transition-all">
-               <div className="flex items-center gap-4">
-                  <div className="w-12 h-12 bg-white rounded-xl flex items-center justify-center text-on-surface/20 border border-slate-100">
-                     <User size={20} />
-                  </div>
-                  <div>
-                     <p className="text-xs font-black text-on-surface uppercase">{u.name}</p>
-                     <p className="text-[10px] font-bold text-slate-400">{u.email}</p>
-                  </div>
-               </div>
-               <div className="flex items-center gap-10">
-                  <span className={`px-3 py-1 rounded-lg text-[9px] font-black uppercase tracking-widest ${
-                    u.role === 'admin' ? 'bg-error/10 text-error' : u.role === 'manager' ? 'bg-tertiary/10 text-tertiary' : 'bg-primary/10 text-primary'
-                  }`}>
-                    {u.role}
-                  </span>
-                  <div className="flex items-center gap-2">
-                     <button className="w-10 h-10 flex items-center justify-center rounded-xl text-slate-300 hover:text-primary transition-all"><Settings2 size={18} /></button>
-                     <button className="w-10 h-10 flex items-center justify-center rounded-xl text-slate-300 hover:text-error transition-all"><Trash2 size={18} /></button>
-                  </div>
-               </div>
-            </div>
-          ))}
+       <div className="text-center">
+          <h3 className="text-xl font-black font-headline uppercase tracking-tight text-on-surface">Gestión Unificada de Staff</h3>
+          <p className="text-slate-400 text-xs font-bold uppercase tracking-widest mt-1 max-w-sm">
+            Ahora puedes gestionar todos tus operadores, permisos y accesos desde la pestaña dedicada de "Operadores".
+          </p>
        </div>
+       <Button 
+         onClick={() => window.dispatchEvent(new CustomEvent('navigate', { detail: 'operators' }))}
+         className="shadow-xl"
+       >
+          Ir a Operadores
+       </Button>
     </motion.div>
   );
 }

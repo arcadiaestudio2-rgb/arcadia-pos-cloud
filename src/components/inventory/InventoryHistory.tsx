@@ -37,9 +37,42 @@ const MOVEMENT_TYPES = [
   { id: 'all', label: 'Todos', icon: History, color: 'bg-slate-500' },
   { id: 'ingreso', label: 'Ingresos', icon: PackagePlus, color: 'bg-tertiary' },
   { id: 'egreso', label: 'Egresos', icon: MinusCircle, color: 'bg-error' },
+  { id: 'PRICE_CHANGE', label: 'Precios', icon: Tag, color: 'bg-indigo-500' },
   { id: 'financiero', label: 'Financiero', icon: DollarSign, color: 'bg-primary' },
   { id: 'otros', label: 'Otros', icon: Settings, color: 'bg-warning' },
 ];
+
+const PriceChangeDetail = ({ details }: { details: any }) => {
+  if (!details) return null;
+
+  const PriceRow = ({ label, data }: { label: string, data: any }) => {
+    const isPositive = data.delta > 0;
+    const isNeutral = data.delta === 0;
+    return (
+      <div className="flex items-center justify-between py-2 border-b border-slate-50 last:border-0">
+        <span className="text-[10px] font-black text-slate-400 uppercase tracking-widest">{label}</span>
+        <div className="flex items-center gap-3">
+          <span className="text-xs font-bold text-slate-400">${data.old.toLocaleString()}</span>
+          <ChevronRight size={12} className="text-slate-200" />
+          <span className="text-sm font-black text-on-surface">${data.new.toLocaleString()}</span>
+          {!isNeutral && (
+            <span className={`text-[10px] font-black px-2 py-0.5 rounded-lg ${isPositive ? 'bg-emerald-50 text-emerald-600' : 'bg-rose-50 text-rose-600'}`}>
+              {isPositive ? '+' : ''}{data.percent.toFixed(1)}%
+            </span>
+          )}
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <div className="bg-slate-50/50 rounded-2xl p-4 border border-slate-100 mt-2">
+      <PriceRow label="Efectivo" data={details.cash} />
+      <PriceRow label="Débito" data={details.debit} />
+      <PriceRow label="Crédito" data={details.credit} />
+    </div>
+  );
+};
 
 export function InventoryHistory({ 
   movements, 
@@ -134,7 +167,7 @@ export function InventoryHistory({
 
         let matchesDate = true;
         if (dateFilter !== 'all') {
-          const mDate = new Date(m.timestamp || m.created_at);
+          const mDate = new Date(m.created_at || m.created_at);
           const now = new Date();
 
           if (dateFilter === 'hoy') {
@@ -182,7 +215,7 @@ export function InventoryHistory({
     const groups = filteredMovements.reduce<Record<string, any>>((acc, m) => {
       // Use event_id (the correct field name from the API)
       const batchKey = m.batch_id || m.event_id || null;
-      const dateDay  = new Date(m.timestamp || m.created_at).toISOString().slice(0, 10);
+      const dateDay  = new Date(m.created_at || m.created_at).toISOString().slice(0, 10);
 
       // Strip "(Talle - Color)" parenthetical to obtain the base product name
       // Prefer base_product_name if available (flat field added in api.ts)
@@ -205,7 +238,7 @@ export function InventoryHistory({
           id: groupKey,
           batch_id:    m.batch_id  || null,
           evento_id:   m.event_id  || null,  // store under evento_id for annulSession compatibility
-          timestamp:   m.timestamp || m.created_at,
+          created_at: m.created_at || m.created_at,
           user:        m.operator  || m.user_name || m.user || 'Sistema',
           reason:      m.reason,
           type:        m.type,
@@ -277,7 +310,7 @@ export function InventoryHistory({
     // Sort by most recent first
     return Object.values(groups).sort(
       (a: any, b: any) =>
-        new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+        new Date(b.created_at).getTime() - new Date(a.created_at).getTime()
     );
   }, [filteredMovements]);
 
@@ -316,7 +349,7 @@ export function InventoryHistory({
     const type = (movement.type || '').toLowerCase();
     const amount = movement.change_amount || movement.quantity || 0;
 
-    if (type === 'ingreso' || type === 'venta' || styleReason.includes('alta') || styleReason.includes('ingreso') || styleReason.includes('venta') || amount > 0) {
+    if (type === 'ingreso' || type === 'venta' || type === 'initial_stock' || styleReason.includes('alta') || styleReason.includes('ingreso') || styleReason.includes('venta') || amount > 0) {
       return { 
         border: 'border-l-tertiary', 
         text: 'text-tertiary', 
@@ -336,13 +369,14 @@ export function InventoryHistory({
       };
     }
     
-    if (type === 'financiero' || styleReason.includes('precio') || styleReason.includes('costo') || styleReason.includes('margen')) {
+    if (type === 'financiero' || type === 'price_change' || type === 'price_change' || styleReason.includes('precio') || styleReason.includes('costo') || styleReason.includes('margen')) {
+      const isPriceChange = type === 'price_change' || type === 'price_change' || styleReason.includes('price_change');
       return { 
-        border: 'border-l-primary', 
-        text: 'text-primary', 
-        bg: 'bg-primary/5', 
-        icon: DollarSign,
-        accent: 'primary'
+        border: isPriceChange ? 'border-l-indigo-500' : 'border-l-primary', 
+        text: isPriceChange ? 'text-indigo-600' : 'text-primary', 
+        bg: isPriceChange ? 'bg-indigo-50/50' : 'bg-primary/5', 
+        icon: isPriceChange ? Tag : DollarSign,
+        accent: isPriceChange ? 'indigo' : 'primary'
       };
     }
 
@@ -366,6 +400,23 @@ export function InventoryHistory({
       // If found in reason, this is likely the more accurate operator for this movement
       operator = opMatch[1].trim();
       cleanReason = fullReason.replace(opMatch[0], '').trim();
+    }
+
+    // Handle JSON Price Change Logs
+    if (cleanReason.startsWith('PRICE_CHANGE_V1|')) {
+      try {
+        const payload = JSON.parse(cleanReason.split('|')[1]);
+        return {
+          motive: 'Ajuste de Precios',
+          description: payload.reason || 'Cambio masivo de lista',
+          operator: payload.operator?.name || operator || 'Sistema',
+          priceChange: payload.prices,
+          source: payload.source,
+          isRich: true
+        };
+      } catch (e) {
+        console.warn("Error parsing price log:", e);
+      }
     }
 
     // Handle structured financial data: COSTO: {cost} | MARGEN: {margin} | PVP: {pvp} | MOTIVO: {reason}
@@ -529,12 +580,11 @@ export function InventoryHistory({
       <div className="space-y-6">
         {loading ? (
           Array.from({ length: 4 }).map((_, i) => (
-            <div key={i} className="h-32 bg-slate-50 rounded-[2.5rem] animate-pulse border border-slate-100" />
+            <div key={`skeleton-${i}`} className="h-32 bg-slate-50 rounded-[2.5rem] animate-pulse border border-slate-100" />
           ))
         ) : groupedSessions.length > 0 ? (
           groupedSessions.map((session, idx) => {
             const style = getMovementStyle(session);
-            const { motive, operator } = parseMovementDetails(session);
             const isExpanded = expandedSessions.has(session.id);
             const isPositive = session.total_amount > 0;
             const Icon = style.icon;
@@ -567,7 +617,14 @@ export function InventoryHistory({
                     <div>
                       <div className="flex items-center gap-2 mb-1">
                         <span className={`px-3 py-0.5 rounded-full text-[9px] font-black uppercase tracking-widest ${style.bg} ${style.text} shadow-sm shadow-current/10`}>
-                          {session.is_batch ? 'Operación de Carga' : 'Movimiento'}
+                          {(() => {
+                            const details = parseMovementDetails(session);
+                            if (details.priceChange) return 'Ajuste de Precio';
+                            if (session.type === 'STOCK_CHANGE') return 'Stock';
+                            if (session.type === 'PRODUCT_EDIT') return 'Edición';
+                            if (session.type === 'VARIANT_CREATED') return 'Nueva Variante';
+                            return session.is_batch ? 'Operación de Carga' : 'Movimiento';
+                          })()}
                         </span>
                         {session.is_annulled && (
                           <span className="px-3 py-0.5 rounded-full text-[9px] font-black uppercase tracking-widest bg-slate-100 text-slate-400 border border-slate-200 flex items-center gap-1">
@@ -581,9 +638,9 @@ export function InventoryHistory({
                       <div className="flex items-center gap-2 mt-1">
                         <Calendar size={12} className="text-slate-300" />
                         <span className="text-[10px] font-bold text-slate-400 uppercase">
-                          {new Date(session.timestamp).toLocaleDateString('es-AR', { day: '2-digit', month: 'short' })}
+                          {new Date(session.created_at).toLocaleDateString('es-AR', { day: '2-digit', month: 'short' })}
                           {', '}
-                          {new Date(session.timestamp).toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' })} hs
+                          {new Date(session.created_at).toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' })} hs
                         </span>
                       </div>
                     </div>
@@ -596,11 +653,22 @@ export function InventoryHistory({
                       <span className="text-xs font-bold text-slate-600 line-clamp-2" style={{ lineClamp: 2 }}>
                         {(() => {
                           const details = parseMovementDetails(session);
+                          if (details.isRich && details.priceChange) {
+                            return `Origen: ${details.source === 'quick_editor' ? 'Ajuste Rápido' : 'Editor Maestro'}`;
+                          }
                           if (details.financial) {
                             return `COSTO: $${details.financial.cost} | MG: ${details.financial.margin}% | PVP: $${details.financial.pvp}`;
                           }
-                          return details.description ? `${details.motive}: ${details.description}` : details.motive;
+                          return details.description || 'Sin descripción';
                         })()}
+                      </span>
+                    </div>
+                    <div className="flex flex-col text-right">
+                      <span className="text-[9px] font-black uppercase text-slate-300 tracking-widest mb-1">
+                        {parseMovementDetails(session).priceChange ? 'Cambio' : 'Impacto'}
+                      </span>
+                      <span className={`text-xl font-black italic tracking-tighter ${style.text}`}>
+                        {parseMovementDetails(session).priceChange ? 'REF' : `${isPositive ? '+' : ''}${session.total_amount}`}
                       </span>
                     </div>
                     <div className="flex flex-col">
@@ -610,28 +678,10 @@ export function InventoryHistory({
                         <span className="text-xs font-bold text-slate-600 truncate">{parseMovementDetails(session).operator}</span>
                       </div>
                     </div>
-                    <div className="flex flex-col hidden md:flex">
-                      <span className="text-[9px] font-black uppercase text-slate-300 tracking-widest mb-1">Variantes</span>
-                      <div className="flex items-center gap-1.5">
-                        <Package size={12} className="text-slate-300" />
-                        <span className="text-xs font-bold text-slate-600">
-                          {session.movements.length > 1
-                            ? `${session.movements.length} variantes`
-                            : session.single_variant || 'Sin variante'}
-                        </span>
-                      </div>
-                    </div>
                   </div>
 
                   {/* Right: Total & Actions */}
                   <div className="flex items-center gap-6 w-full md:w-auto justify-between md:justify-end border-t md:border-t-0 pt-4 md:pt-0 border-slate-50">
-                    <div className="text-right">
-                      <p className={`text-2xl font-black italic tracking-tighter ${style.text}`}>
-                        {session.type === 'financiero' ? 'OK' : `${isPositive ? '+' : ''}${session.total_amount}u.`}
-                      </p>
-                      <p className="text-[9px] font-bold uppercase text-slate-300 tracking-widest">Total Impacto</p>
-                    </div>
-
                     <div className="flex items-center gap-2">
                       {annulSession && !session.is_annulled && (
                         <button
@@ -651,8 +701,8 @@ export function InventoryHistory({
                         <ChevronDown size={20} />
                       </div>
                     </div>
-                    </div>
                   </div>
+                </div>
 
                 {/* Collapsible Detail Section: Variant Table */}
                 <AnimatePresence>
@@ -668,58 +718,53 @@ export function InventoryHistory({
                         <div className="flex items-center gap-3 mb-4">
                           <Package size={16} className={style.text} />
                           <h5 className="text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">
-                            Desglose de Variantes — {session.movements.length} líneas
+                            {parseMovementDetails(session).priceChange ? 'Detalle de Ajuste' : `Desglose de Variantes — ${session.movements.length} líneas`}
                           </h5>
                         </div>
 
-                        {/* Table Header */}
-                        <div className="grid grid-cols-[1fr_1fr_2fr_auto] gap-x-4 px-4 mb-2">
-                          <span className="text-[9px] font-black uppercase tracking-widest text-slate-300">Talle</span>
-                          <span className="text-[9px] font-black uppercase tracking-widest text-slate-300">Color</span>
-                          <span className="text-[9px] font-black uppercase tracking-widest text-slate-300">SKU</span>
-                          <span className="text-[9px] font-black uppercase tracking-widest text-slate-300 text-right">Unidades</span>
-                        </div>
-
-                        {/* Table Rows */}
-                        <div className="space-y-1.5">
-                          {session.movements.map((m: any, mIdx: number) => {
-                            // Resolve size & color from direct fields or nested inventory_items relation
-                            const size  = m.size  || m.inventory_items?.size  || m.variant?.size  || '—';
-                            const color = m.color || m.inventory_items?.color || m.variant?.color || '—';
-                            const sku   = m.sku   || m.inventory_items?.sku   || m.variant?.sku   || 'N/A';
-                            const mAmount  = m.change_amount ?? m.quantity ?? 0;
-                            const mPositive = mAmount > 0;
-                            return (
-                              <div
-                                key={m.id || mIdx}
-                                className="grid grid-cols-[1fr_1fr_2fr_auto] gap-x-4 items-center bg-white px-4 py-3 rounded-2xl border border-slate-100 hover:border-slate-200 transition-colors"
-                              >
-                                <span className="text-xs font-black text-on-surface uppercase">
-                                  {size}
-                                </span>
-                                <span className="text-xs font-bold text-slate-600 uppercase">
-                                  {color}
-                                </span>
-                                <span className="text-[10px] font-mono text-slate-400 truncate" title={sku}>
-                                  {sku}
-                                </span>
-                                <span className={`text-sm font-black italic text-right tabular-nums ${
-                                  m.type === 'financiero' ? 'text-primary' : mPositive ? 'text-tertiary' : 'text-error'
-                                }`}>
-                                  {m.type === 'financiero' ? '—' : `${mPositive ? '+' : ''}${mAmount}`}
-                                </span>
-                              </div>
-                            );
-                          })}
+                        {/* Variant List or Price Details */}
+                        <div className="space-y-3">
+                          {(() => {
+                            const details = parseMovementDetails(session);
+                            if (details.isRich && details.priceChange) {
+                              return <PriceChangeDetail details={details.priceChange} />;
+                            }
+                            
+                            return session.movements.map((m: any, mIdx: number) => {
+                              const mAmount = m.change_amount || m.quantity || 0;
+                              const mPositive = mAmount > 0;
+                              const color = typeof m.color === 'string' ? m.color : (m.color?.name || m.color?.value || '-');
+                              const sku = m.sku || 'N/A';
+                              
+                              return (
+                                <div key={m.id || mIdx} className="grid grid-cols-[1fr_80px_100px_80px] gap-4 items-center p-3 hover:bg-slate-50 rounded-2xl transition-colors border border-transparent hover:border-slate-100">
+                                  <span className="text-xs font-black text-on-surface uppercase">
+                                    {m.size || '-'}
+                                  </span>
+                                  <span className="text-xs font-bold text-slate-600 uppercase">
+                                    {color}
+                                  </span>
+                                  <span className="text-[10px] font-mono text-slate-400 truncate" title={sku}>
+                                    {sku}
+                                  </span>
+                                  <span className={`text-sm font-black italic text-right tabular-nums ${
+                                    m.type === 'financiero' ? 'text-primary' : mPositive ? 'text-tertiary' : 'text-error'
+                                  }`}>
+                                    {m.type === 'financiero' ? '—' : `${mPositive ? '+' : ''}${mAmount}`}
+                                  </span>
+                                </div>
+                              );
+                            });
+                          })()}
                         </div>
 
                         {/* Summary footer */}
                         <div className="mt-4 flex items-center justify-between px-4 pt-4 border-t border-slate-200">
                           <span className="text-[9px] font-black uppercase tracking-widest text-slate-300">
-                            Total del lote
+                            {parseMovementDetails(session).priceChange ? 'Estado del ajuste' : 'Total del lote'}
                           </span>
                           <span className={`text-base font-black italic ${style.text}`}>
-                            {isPositive ? '+' : ''}{session.total_amount} unidades
+                            {parseMovementDetails(session).priceChange ? 'PRECIOS ACTUALIZADOS' : `${isPositive ? '+' : ''}${session.total_amount} unidades`}
                           </span>
                         </div>
                       </div>
@@ -770,7 +815,7 @@ export function InventoryHistory({
       <AnimatePresence>
         {selectedSession && (() => {
           const style = getMovementStyle(selectedSession);
-          const { motive, description, operator } = parseMovementDetails(selectedSession);
+          const { operator } = parseMovementDetails(selectedSession);
           const amount = selectedSession.change_amount || selectedSession.quantity || 0;
           const isPositive = amount > 0;
           
@@ -837,7 +882,7 @@ export function InventoryHistory({
                       <div>
                         <p className="text-[10px] font-black text-slate-300 uppercase tracking-widest mb-1">Fecha y Hora</p>
                         <p className="font-black text-on-surface uppercase">
-                          {new Date(selectedSession.timestamp).toLocaleString('es-AR', { 
+                          {new Date(selectedSession.created_at).toLocaleString('es-AR', { 
                             weekday: 'long', day: '2-digit', month: 'long', year: 'numeric', hour: '2-digit', minute: '2-digit' 
                           })}
                         </p>

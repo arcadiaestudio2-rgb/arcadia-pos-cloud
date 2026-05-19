@@ -1,24 +1,22 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { 
   Search, 
   Download, 
   TrendingUp, 
   CreditCard, 
-  XOctagon, 
   ArrowRight,
   Clock,
   Printer, 
   FileText,
   Loader2,
-  CheckCircle2,
-  CalendarDays,
   RefreshCw
 } from 'lucide-react';
-import { motion, AnimatePresence } from 'motion/react';
+import { AnimatePresence } from 'motion/react';
 import { TransactionDetailDrawer } from './TransactionDetailDrawer';
 import { ShiftSummary } from './ShiftSummary';
 import { formatDate, formatCurrency, getLocalISODate } from '../../utils/format';
 import { api } from '../../services/api';
+import { subscribeChannel, removeChannel } from '../../realtime/realtimeBootstrap';
 
 // ─── Date Range Helpers ────────────────────────────────────────────────
 type DateFilter = 'Hoy' | 'Ayer' | '7 Días' | '30 Días';
@@ -57,18 +55,17 @@ function getDateRange(filter: DateFilter): { from: string; to: string } {
 function mapSale(s: any) {
   return {
     id: s.id,
-    timestamp: s.timestamp,
+    created_at: s.created_at,
     total: s.total,
     discount: s.discount || 0,
-    client_id: s.client_id,
+    client_id: s.client_id || null,
     customer: s.clients?.name || 'Consumidor Final',
     dni: s.clients?.dni_tax_id || '-',
     paymentMethod: s.payment_method,
-    payment_details: s.payment_details,
-    seller: s.users?.name || 'Sistema',
-    status: s.status || 'completed',
-    void_reason: s.void_reason,
-    type: (s.items_count === 0) ? 'credit_payment' : 'sale'
+    payment_details: s.payment_details || {},
+    seller: s.user_id?.name || 'Sistema',
+    type: 'sale', // Simplified since items_count is missing
+    status: s.status || 'completed'
   };
 }
 
@@ -77,7 +74,7 @@ export function HistoryManager() {
   const [sales, setSales] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
-  const [statusFilter, setStatusFilter] = useState('all');
+  const [statusFilter] = useState('all');
   const [paymentFilter, setPaymentFilter] = useState('all');
   const [dateFilter, setDateFilter] = useState<DateFilter>('Hoy');
   const [selectedTransaction, setSelectedTransaction] = useState<any>(null);
@@ -96,11 +93,39 @@ export function HistoryManager() {
     }
   }, [dateFilter]);
 
+
+  const isSubscribed = useRef(false);
+
   useEffect(() => {
     loadSales();
+    
+    // 1. Local events
     const handleRefresh = () => loadSales();
     window.addEventListener('refresh-sales', handleRefresh);
-    return () => window.removeEventListener('refresh-sales', handleRefresh);
+    
+    // 2. Cloud Realtime
+    if (!isSubscribed.current) {
+      const channelName = "sales-history-realtime";
+      const options = {
+        event: "*",
+        schema: "public",
+        table: "sales"
+      };
+
+      const onEvent = async (payload: any) => {
+        console.log("📦 [REALTIME_EVENT]", payload);
+        await loadSales();
+      };
+
+      subscribeChannel(channelName, options, onEvent);
+      isSubscribed.current = true;
+
+      return () => {
+        window.removeEventListener('refresh-sales', handleRefresh);
+        removeChannel(channelName, options, onEvent);
+        isSubscribed.current = false;
+      };
+    }
   }, [loadSales]);
 
   const filteredSales = useMemo(() => {
@@ -132,7 +157,7 @@ export function HistoryManager() {
     if (filteredSales.length === 0) return;
     const headers = ['ID', 'Fecha', 'Cliente', 'DNI', 'Método Pago', 'Total', 'Estado', 'Vendedor'];
     const rows = filteredSales.map(s => [
-      s.id, formatDate(s.timestamp), s.customer, s.dni,
+      s.id, formatDate(s.created_at), s.customer, s.dni,
       s.paymentMethod, s.total, s.status, s.seller
     ]);
     const csv = [
@@ -198,7 +223,7 @@ export function HistoryManager() {
         <div className="max-w-[1500px] mx-auto space-y-10">
 
           {/* KPI CARDS */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
             <section className="bg-white p-8 rounded-[2rem] border border-slate-100 shadow-sm flex justify-between items-start group">
               <div>
                 <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">
@@ -208,7 +233,7 @@ export function HistoryManager() {
                   {formatCurrency(kpis.netSales)}
                 </h4>
                 <p className="text-[10px] font-bold text-slate-300 mt-1">
-                  {sales.filter(s => s.status !== 'voided').length} operaciones
+                  {sales.length} operaciones
                 </p>
               </div>
               <div className="p-3 bg-tertiary/5 text-tertiary rounded-2xl group-hover:scale-110 transition-transform">
@@ -225,21 +250,6 @@ export function HistoryManager() {
               </div>
               <div className="p-3 bg-primary/5 text-primary rounded-2xl group-hover:scale-110 transition-transform">
                 <CreditCard size={24} />
-              </div>
-            </section>
-
-            <section className="bg-white p-8 rounded-[2rem] border border-slate-100 shadow-sm flex justify-between items-start group">
-              <div>
-                <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Total Anulado</p>
-                <h4 className="text-3xl font-black font-headline italic tracking-tighter text-error">
-                  {formatCurrency(kpis.voidedTotal)}
-                </h4>
-                <p className="text-[10px] font-bold text-slate-300 mt-1">
-                  {sales.filter(s => s.status === 'voided').length} transacciones
-                </p>
-              </div>
-              <div className="p-3 bg-error/5 text-error rounded-2xl group-hover:scale-110 transition-transform">
-                <XOctagon size={24} />
               </div>
             </section>
           </div>
@@ -275,15 +285,6 @@ export function HistoryManager() {
 
             <div className="flex items-center gap-4">
               <select
-                value={statusFilter}
-                onChange={(e) => setStatusFilter(e.target.value)}
-                className="h-14 px-6 bg-slate-50 border border-slate-100 rounded-2xl text-[10px] font-black text-slate-500 uppercase tracking-widest outline-none focus:ring-4 focus:ring-primary/5 transition-all appearance-none cursor-pointer"
-              >
-                <option value="all">Estado: Todos</option>
-                <option value="completed">Confirmadas</option>
-                <option value="voided">Anuladas</option>
-              </select>
-              <select
                 value={paymentFilter}
                 onChange={(e) => setPaymentFilter(e.target.value)}
                 className="h-14 px-6 bg-slate-50 border border-slate-100 rounded-2xl text-[10px] font-black text-slate-500 uppercase tracking-widest outline-none focus:ring-4 focus:ring-primary/5 transition-all appearance-none cursor-pointer"
@@ -306,14 +307,13 @@ export function HistoryManager() {
                   <th className="py-6 px-10 text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">Tipo de Op.</th>
                   <th className="py-6 px-10 text-[10px] font-black uppercase tracking-[0.2em] text-slate-400">Titular / Cliente</th>
                   <th className="py-6 px-10 text-[10px] font-black uppercase tracking-[0.2em] text-slate-400 text-right">Monto Final</th>
-                  <th className="py-6 px-10 text-[10px] font-black uppercase tracking-[0.2em] text-slate-400 text-center">Estado</th>
                   <th className="py-6 px-10 w-20"></th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-50">
                 {isLoading ? (
                   <tr>
-                    <td colSpan={6} className="py-20 text-center">
+                    <td colSpan={5} className="py-20 text-center">
                       <Loader2 className="animate-spin mx-auto text-primary mb-4" size={32} />
                       <p className="text-[10px] font-black uppercase tracking-[0.3em] text-slate-300">Sincronizando...</p>
                     </td>
@@ -327,31 +327,25 @@ export function HistoryManager() {
                     <td className="py-6 px-10">
                       <div className="flex items-center gap-3">
                         <div className={`w-2 h-2 rounded-full ${
-                          sale.status === 'voided'
-                            ? 'bg-error'
-                            : sale.type === 'credit_payment'
-                              ? 'bg-primary'
-                              : 'bg-tertiary'
+                          sale.type === 'credit_payment'
+                            ? 'bg-primary'
+                            : 'bg-tertiary'
                         }`} />
                         <div>
                           <p className="text-xs font-black text-on-surface">{sale.id}</p>
-                          <p className="text-[10px] font-bold text-slate-300 uppercase mt-0.5">{formatDate(sale.timestamp)}</p>
+                          <p className="text-[10px] font-bold text-slate-300 uppercase mt-0.5">{formatDate(sale.created_at)}</p>
                         </div>
                       </div>
                     </td>
                     <td className="py-6 px-10">
                       <span className={`px-2 py-0.5 rounded text-[9px] font-black uppercase tracking-widest ${
-                        sale.status === 'voided'
-                          ? 'bg-error/10 text-error'
-                          : sale.type === 'credit_payment'
-                            ? 'bg-primary/10 text-primary'
-                            : 'bg-tertiary/10 text-tertiary'
+                        sale.type === 'credit_payment'
+                          ? 'bg-primary/10 text-primary'
+                          : 'bg-tertiary/10 text-tertiary'
                       }`}>
-                        {sale.status === 'voided'
-                          ? 'ANULADA'
-                          : sale.type === 'credit_payment'
-                            ? 'PAGO CUENTA CTE'
-                            : 'VENTA COMPLETADA'}
+                        {sale.type === 'credit_payment'
+                          ? 'PAGO CUENTA CTE'
+                          : 'VENTA COMPLETADA'}
                       </span>
                     </td>
                     <td className="py-6 px-10">
@@ -359,22 +353,12 @@ export function HistoryManager() {
                       <p className="text-[10px] font-bold text-slate-300 uppercase">DNI: {sale.dni}</p>
                     </td>
                     <td className="py-6 px-10 text-right">
-                      <p className={`text-base font-black font-headline italic tracking-tighter ${
-                        sale.status === 'voided' ? 'text-slate-300 line-through opacity-50' : 'text-on-surface'
-                      }`}>
+                      <p className="text-base font-black font-headline italic tracking-tighter text-on-surface">
                         {formatCurrency(sale.total)}
                       </p>
                       <p className="text-[9px] font-bold text-slate-300 uppercase mt-0.5">
                         {sale.paymentMethod === 'mixto' ? 'Mixto' : sale.paymentMethod}
                       </p>
-                    </td>
-                    <td className="py-6 px-10 text-center">
-                      <div className={`inline-flex items-center gap-2 px-3 py-1 rounded-full text-[9px] font-black uppercase tracking-widest ${
-                        sale.status === 'voided' ? 'bg-error/10 text-error' : 'bg-tertiary/10 text-tertiary'
-                      }`}>
-                        {sale.status === 'voided' ? <XOctagon size={10} /> : <CheckCircle2 size={10} />}
-                        {sale.status === 'voided' ? 'Anulada' : 'Confirmada'}
-                      </div>
                     </td>
                     <td className="py-6 px-10 text-right">
                       <div className="w-10 h-10 rounded-full bg-slate-50 flex items-center justify-center text-slate-300 group-hover:bg-primary group-hover:text-white transition-all">

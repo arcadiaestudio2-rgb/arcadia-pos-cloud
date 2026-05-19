@@ -7,7 +7,6 @@ import React, { useState } from 'react';
 import { Sidebar } from './components/Sidebar';
 import { Header } from './components/Header';
 import { Dashboard } from './components/Dashboard';
-import { CatalogTable } from './components/catalog/CatalogTable';
 import { ProductEditor } from './components/catalog/ProductEditor';
 import { InventoryManager } from './components/inventory/InventoryManager';
 import POS from './components/pos/POS';
@@ -15,14 +14,18 @@ import { POSSettings } from './components/config/StoreSettings';
 import { HistoryManager } from './components/history/HistoryManager';
 import { ProfileSettings } from './components/profile/ProfileSettings';
 import { Toaster } from './components/common/CommonUI';
-import { AuthProvider, useAuth } from './context/AuthContext';
-import { OperatorProvider, useOperator } from './context/OperatorContext';
+import { useAuth } from './context/AuthContext';
+import { useOperator } from './context/OperatorContext';
 import { Login } from './components/auth/Login';
+import { InitialOperatorSetup } from './components/auth/InitialOperatorSetup';
+import { OperatorManager } from './components/auth/OperatorManager';
 import { ShiftOpeningModal } from './components/history/ShiftOpeningModal';
+import { api } from './services/api';
+import { SyncService } from './services/syncService';
 
 function AppContent() {
   const { isAuthenticated, isLoading: isAuthLoading } = useAuth();
-  const { isLoading: isOperatorLoading } = useOperator();
+  const { operators, isLoading: isOperatorLoading } = useOperator();
   const [activeTab, setActiveTab] = useState('dashboard');
   const [editingProduct, setEditingProduct] = useState<any>(null);
   const [sidebarOpen, setSidebarOpen] = useState(false);
@@ -48,6 +51,20 @@ function AppContent() {
     window.addEventListener('navigate', handleNav);
     return () => window.removeEventListener('navigate', handleNav);
   }, []);
+
+  const syncInitialized = React.useRef(false);
+
+  // Initialize Sync Service and Mirroring
+  React.useEffect(() => {
+    if (isAuthenticated && !syncInitialized.current) {
+      syncInitialized.current = true;
+      // Start background sync
+      SyncService.start();
+      
+      // Perform initial mirror
+      api.mirrorCloudToLocal();
+    }
+  }, [isAuthenticated]);
 
   // Check initial shift status on launch
   React.useEffect(() => {
@@ -95,6 +112,11 @@ function AppContent() {
     return <Login />;
   }
 
+  // 3. Initial Setup State (If authenticated but no operators exist)
+  if (operators.length === 0) {
+    return <InitialOperatorSetup />;
+  }
+
   // --- MAIN RENDER LOGIC ---
 
   const renderContent = () => {
@@ -107,6 +129,8 @@ function AppContent() {
         return <POS onMenuClick={() => setSidebarOpen(true)} />;
       case 'history':
         return <HistoryManager />;
+      case 'operators':
+        return <OperatorManager />;
       case 'profile':
         return <ProfileSettings />;
       case 'config':

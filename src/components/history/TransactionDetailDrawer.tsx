@@ -1,15 +1,11 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { 
   X, 
   Printer, 
-  XOctagon, 
   Clock, 
   User, 
   MapPin, 
-  Phone, 
-  ChevronRight,
   Loader2,
-  AlertTriangle,
   Receipt,
   CreditCard,
   Banknote,
@@ -22,7 +18,6 @@ import {
 import { motion } from 'motion/react';
 import { formatDate, formatCurrency } from '../../utils/format';
 import { api } from '../../services/api';
-import { useAuth } from '../../context/AuthContext';
 import { SaleTicket } from './SaleTicket';
 
 interface TransactionDetailDrawerProps {
@@ -31,12 +26,8 @@ interface TransactionDetailDrawerProps {
 }
 
 export function TransactionDetailDrawer({ transaction, onClose }: TransactionDetailDrawerProps) {
-  const { user } = useAuth();
   const [items, setItems] = useState<any[]>([]);
   const [isLoading, setIsLoading] = useState(true);
-  const [isVoiding, setIsVoiding] = useState(false);
-  const [voidReason, setVoidReason] = useState('');
-  const [showVoidConfirm, setShowVoidConfirm] = useState(false);
 
   useEffect(() => {
     const fetchItems = async () => {
@@ -54,29 +45,11 @@ export function TransactionDetailDrawer({ transaction, onClose }: TransactionDet
     fetchItems();
   }, [transaction.id]);
 
-  const handleVoid = async () => {
-    if (!voidReason.trim()) return;
-    
-    try {
-      setIsVoiding(true);
-      await api.voidSale(transaction.id, voidReason, user?.id ? parseInt(user.id) : 1);
-      
-      // Auto-print the voided ticket before refreshing and closing
-      handlePrint();
-      
-      window.dispatchEvent(new CustomEvent('refresh-sales'));
-      onClose();
-    } catch (error) {
-      console.error('Error voiding sale:', error);
-      alert('Error al anular la venta');
-    } finally {
-      setIsVoiding(false);
-    }
-  };
+
 
   const handleWhatsApp = () => {
     let message = `*ARCADIA POS - Ticket #${transaction.id}*\n`;
-    message += `📅 ${formatDate(transaction.timestamp)}\n\n`;
+    message += `📅 ${formatDate(transaction.created_at)}\n\n`;
     message += `*Detalle:*\n`;
     
     items.forEach(item => {
@@ -153,22 +126,15 @@ export function TransactionDetailDrawer({ transaction, onClose }: TransactionDet
         {/* BLOCK 1: HEADER */}
         <header className="p-8 border-b border-slate-100 flex justify-between items-center bg-white sticky top-0 z-10">
           <div className="flex items-center gap-4">
-            <div className={`w-12 h-12 rounded-2xl flex items-center justify-center ${
-              transaction.status === 'voided' ? 'bg-error/10 text-error' : 'bg-primary/10 text-primary'
-            }`}>
-              {transaction.status === 'voided' ? <XOctagon size={24} /> : <Receipt size={24} />}
+            <div className="w-12 h-12 rounded-2xl flex items-center justify-center bg-primary/10 text-primary">
+              <Receipt size={24} />
             </div>
             <div>
                <div className="flex items-center gap-2 mb-0.5">
                   <h3 className="text-xl font-black font-headline tracking-tight text-on-surface uppercase">Ticket #{transaction.id}</h3>
-                  <span className={`px-2 py-0.5 rounded text-[9px] font-black uppercase tracking-widest ${
-                    transaction.status === 'voided' ? 'bg-error text-white' : 'bg-tertiary text-white'
-                  }`}>
-                    {transaction.status === 'voided' ? 'Anulado' : 'Confirmado'}
-                  </span>
                </div>
                <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest flex items-center gap-2">
-                 <Clock size={12} className="text-slate-300" /> {formatDate(transaction.timestamp)}
+                 <Clock size={12} className="text-slate-300" /> {formatDate(transaction.created_at)}
                </p>
             </div>
           </div>
@@ -372,21 +338,12 @@ export function TransactionDetailDrawer({ transaction, onClose }: TransactionDet
                   </div>
                   <div>
                     <p className="text-[9px] font-bold text-white/40 uppercase mb-1">Estampa de Tiempo</p>
-                    <p className="text-sm font-black uppercase tracking-tight">{formatDate(transaction.timestamp)}</p>
+                    <p className="text-sm font-black uppercase tracking-tight">{formatDate(transaction.created_at)}</p>
                     <p className="text-[9px] font-medium text-white/30 uppercase mt-0.5">Control de Integridad OK</p>
                   </div>
                </div>
             </div>
-            {transaction.status === 'voided' && (
-              <div className="mt-8 p-4 bg-error/10 border border-error/20 rounded-2xl">
-                 <div className="flex items-center gap-2 mb-2 text-error">
-                    <AlertTriangle size={14} />
-                    <p className="text-[10px] font-black uppercase tracking-widest">Motivo de Anulación</p>
-                 </div>
-                 <p className="text-xs text-white/70 italic">"{transaction.void_reason || 'Sin motivo especificado'}"</p>
-                 <p className="text-[9px] font-bold text-error/60 uppercase mt-2">ANULADO EL {transaction.voided_at ? formatDate(transaction.voided_at) : '-'}</p>
-              </div>
-            )}
+
           </section>
         </div>
 
@@ -405,62 +362,7 @@ export function TransactionDetailDrawer({ transaction, onClose }: TransactionDet
           >
             <Share2 size={18} /> WhatsApp
           </button>
-          
-          {transaction.status !== 'voided' && (
-            <button 
-              onClick={() => setShowVoidConfirm(true)}
-              className="h-16 rounded-2xl bg-error/5 border-2 border-error/20 text-error flex items-center justify-center gap-3 hover:bg-error hover:text-white transition-all font-black uppercase text-[10px] tracking-[0.2em] group"
-            >
-              <XOctagon size={18} /> Anular
-            </button>
-          )}
         </footer>
-
-        {/* VOID CONFIRMATION MODAL */}
-        {showVoidConfirm && (
-          <div className="absolute inset-0 z-50 bg-on-surface/60 backdrop-blur-md flex items-center justify-center p-8">
-            <motion.div 
-              initial={{ scale: 0.9, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              className="bg-white w-full max-w-md rounded-[2.5rem] p-10 shadow-2xl border border-slate-100"
-            >
-              <div className="w-20 h-20 rounded-3xl bg-error/10 text-error flex items-center justify-center mx-auto mb-8 animate-bounce">
-                <AlertTriangle size={40} />
-              </div>
-              <h4 className="text-2xl font-black font-headline tracking-tight text-center text-on-surface uppercase mb-2">¿Confirmar Anulación?</h4>
-              <p className="text-sm text-slate-400 text-center mb-8 px-4">Esta acción revertirá el stock de los productos y cancelará el ingreso financiero de forma permanente.</p>
-              
-              <div className="space-y-6">
-                <div>
-                  <label className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 block ml-1">Motivo de Anulación</label>
-                  <textarea 
-                    value={voidReason}
-                    onChange={(e) => setVoidReason(e.target.value)}
-                    placeholder="Ej: Error en el cobro, Devolución..."
-                    className="w-full h-32 bg-slate-50 border-none rounded-2xl p-4 text-sm font-bold focus:ring-4 focus:ring-error/10 outline-none resize-none"
-                  />
-                </div>
-
-                <div className="grid grid-cols-2 gap-4">
-                  <button 
-                    onClick={() => setShowVoidConfirm(false)}
-                    className="h-14 rounded-2xl text-slate-400 font-black uppercase text-[10px] tracking-widest hover:bg-slate-50 transition-colors"
-                  >
-                    Cancelar
-                  </button>
-                  <button 
-                    onClick={handleVoid}
-                    disabled={!voidReason.trim() || isVoiding}
-                    className="h-14 rounded-2xl bg-error text-white font-black uppercase text-[10px] tracking-widest shadow-lg shadow-error/30 hover:brightness-110 disabled:opacity-50 transition-all flex items-center justify-center gap-2"
-                  >
-                    {isVoiding ? <Loader2 className="animate-spin" size={16} /> : <ShieldCheck size={16} />}
-                    Confirmar
-                  </button>
-                </div>
-              </div>
-            </motion.div>
-          </div>
-        )}
 
         {/* HIDDEN TICKET FOR PRINTING */}
         <div className="hidden">

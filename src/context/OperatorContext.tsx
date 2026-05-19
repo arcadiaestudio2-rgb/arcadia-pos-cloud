@@ -3,10 +3,11 @@ import { toast } from '../components/common/CommonUI';
 import { api } from '../services/api';
 
 export interface Operator {
-  id: number | string;
+  id: string;
   name: string;
   role: string;
   email?: string;
+  store_id?: string;
 }
 
 interface OperatorContextType {
@@ -14,9 +15,12 @@ interface OperatorContextType {
   operatorName: string | null;
   setSelectedOperator: (op: Operator | null) => void;
   operators: Operator[];
+  addOperator: (name: string, role: string) => Promise<void>;
+  removeOperator: (id: string) => Promise<void>;
+  setOperators: (ops: Operator[]) => void;
   isOperatorSelected: boolean;
   isLoading: boolean;
-  supabase: any; // Add supabase to context
+  supabase: any;
 }
 
 const OperatorContext = createContext<OperatorContextType | undefined>(undefined);
@@ -26,44 +30,41 @@ export const OperatorProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   const [operators, setOperators] = useState<Operator[]>([]);
   const [isLoading, setIsLoading] = useState(true);
 
-  useEffect(() => {
-    const fetchUsers = async () => {
-      // Solo intentamos cargar si estamos en local (servidor local) o si hay una sesión activa en Supabase
-      const { data: { session } } = await api.supabase.auth.getSession();
-      const isLocal = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1';
-      
-      if (!session && !isLocal) {
-        setIsLoading(false);
-        return;
-      }
-
-      try {
-        const users = await api.getUsers();
+  const fetchUsers = async () => {
+    try {
+      const users = await api.getUsers();
+      if (users) {
         setOperators(users);
-        
-        const saved = localStorage.getItem('arcadia_operator_v2');
-        if (saved) {
-          try {
-            const savedOp = JSON.parse(saved);
-            const exists = users.find((u: any) => 
-              u.id === savedOp.id || 
-              (u.email && savedOp.email && u.email === savedOp.email)
-            );
-            if (exists) {
-              setSelectedOperatorState(exists);
-            }
-          } catch (e) {
-            localStorage.removeItem('arcadia_operator_v2');
-          }
-        }
-      } catch (error) {
-        console.error('Error fetching users:', error);
-      } finally {
-        setIsLoading(false);
       }
-    };
+      
+      const saved = localStorage.getItem('arcadia_operator_v2');
+      if (saved) {
+        try {
+          const savedOp = JSON.parse(saved);
+          const exists = users.find((u: any) => 
+            u.id === savedOp.id || 
+            (u.email && savedOp.email && u.email === savedOp.email)
+          );
+          if (exists) {
+            setSelectedOperatorState(exists);
+          }
+        } catch (e) {
+          localStorage.removeItem('arcadia_operator_v2');
+        }
+      }
+    } catch (error) {
+      console.error('Error fetching users:', error);
+    } finally {
+      setIsLoading(false);
+    }
+  };
 
+  useEffect(() => {
     fetchUsers();
+    
+    const handleRefresh = () => fetchUsers();
+    window.addEventListener('refresh-operators', handleRefresh);
+    return () => window.removeEventListener('refresh-operators', handleRefresh);
   }, []);
 
   const setSelectedOperator = (op: Operator | null) => {
@@ -76,6 +77,31 @@ export const OperatorProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     }
   };
 
+  const addOperator = async (name: string, role: string) => {
+    try {
+      const newOp = await api.createOperator({ name, role });
+      setOperators(prev => [...prev, newOp]);
+      toast.success(`Operador ${name} creado con éxito`);
+    } catch (error: any) {
+      toast.error(`Error al crear operador: ${error.message}`);
+      throw error;
+    }
+  };
+
+  const removeOperator = async (id: string) => {
+    try {
+      await api.deleteOperator(id);
+      setOperators(prev => prev.filter(op => op.id !== id));
+      if (selectedOperator?.id === id) {
+        setSelectedOperator(null);
+      }
+      toast.success('Operador eliminado');
+    } catch (error: any) {
+      toast.error(`Error al eliminar: ${error.message}`);
+      throw error;
+    }
+  };
+
   return (
     <OperatorContext.Provider 
       value={{ 
@@ -83,9 +109,12 @@ export const OperatorProvider: React.FC<{ children: React.ReactNode }> = ({ chil
         operatorName: selectedOperator?.name || null,
         setSelectedOperator, 
         operators,
+        addOperator,
+        removeOperator,
+        setOperators,
         isOperatorSelected: !!selectedOperator,
         isLoading,
-        supabase: api.supabase // Pass supabase through context
+        supabase: api.supabase
       }}
     >
       {children}

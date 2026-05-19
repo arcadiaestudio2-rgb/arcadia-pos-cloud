@@ -17,13 +17,13 @@ export const ProductGrid: React.FC<ProductGridProps> = ({ products, onAddToCart,
     const groups: { [key: string]: any } = {};
     
     products.forEach(p => {
-      // Use product_id for grouping variants of the same product
-      const key = p.product_id || p.id; 
+      // Use productId for grouping variants of the same product
+      const key = p.product_id || p.productId || p.id; 
       
       // Parse manual price overrides from provider_info
       let overridePrices = { cash: 0, debit: 0, credit: 0 };
       try {
-        const rawInfo = p.provider_info || p.products?.provider_info;
+        const rawInfo = p.provider_info || p.providerInfo;
         if (rawInfo && String(rawInfo) !== "[object Object]") {
           const pInfo = typeof rawInfo === 'string' ? JSON.parse(rawInfo) : rawInfo;
           if (pInfo && pInfo.manual_prices) {
@@ -36,14 +36,15 @@ export const ProductGrid: React.FC<ProductGridProps> = ({ products, onAddToCart,
         }
       } catch (e) {}
 
-      const baseCash = overridePrices.cash || p.pvp || p.price || 0;
-      const baseDebit = overridePrices.debit || baseCash;
-      const baseCredit = overridePrices.credit || baseCash;
+      const baseCash = overridePrices.cash || p.priceCash || p.pvp || 0;
+      const baseDebit = overridePrices.debit || p.priceDebit || baseCash;
+      const baseCredit = overridePrices.credit || p.priceCredit || baseCash;
 
       if (!groups[key]) {
         groups[key] = {
           ...p,
-          id: key, 
+          product_id: key,
+          id: key, // Keep id for legacy components if needed
           minPrice: baseCash,
           maxPrice: baseCash,
           totalStock: 0,
@@ -64,6 +65,10 @@ export const ProductGrid: React.FC<ProductGridProps> = ({ products, onAddToCart,
       // Store the variant in the list
       groups[key].variants.push({
         ...p,
+        variant_id: p.id,
+        product_id: key,
+        price_at_sale: baseCash,
+        quantity: 1,
         prices: {
           cash: baseCash,
           debit: baseDebit,
@@ -82,14 +87,13 @@ export const ProductGrid: React.FC<ProductGridProps> = ({ products, onAddToCart,
       <div className="grid grid-cols-2 sm:grid-cols-3 xl:grid-cols-4 gap-3">
         <AnimatePresence mode="popLayout">
           {groupedProducts.length > 0 ? (
-            groupedProducts.map((p, idx) => (
+            groupedProducts.map((p) => (
               <ProductCard 
-                key={p.id} 
+                key={p.product_id} 
                 product={p} 
                 onAdd={onAddToCart} 
-                index={idx} 
                 activeProductId={activeProductId}
-                onOpenModal={() => setActiveProductId(p.id)}
+                onOpenModal={() => setActiveProductId(p.product_id)}
                 onCloseModal={() => setActiveProductId(null)}
               />
             ))

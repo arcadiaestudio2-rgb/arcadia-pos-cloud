@@ -1,10 +1,9 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import { motion } from 'motion/react';
 import { 
   X, 
   Settings, 
   Printer, 
-  Download, 
   Zap,
   DollarSign,
   CreditCard,
@@ -12,7 +11,7 @@ import {
   Clock,
   Loader2
 } from 'lucide-react';
-import { formatDate, formatCurrency } from '../../utils/format';
+import { formatCurrency } from '../../utils/format';
 import { api } from '../../services/api';
 
 interface Props {
@@ -89,7 +88,7 @@ export function ShiftSummary({ dateFilter = 'Hoy', onClose }: Props) {
   let operationsCount = 0;
 
   sales.forEach((sale: any) => {
-    if (sale.status === 'voided') return;
+    if (sale.status && sale.status === 'voided') return;
     operationsCount++;
     totalSales += sale.total;
 

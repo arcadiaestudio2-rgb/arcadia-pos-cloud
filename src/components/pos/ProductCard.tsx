@@ -1,20 +1,14 @@
 import React, { useState, useMemo, useEffect } from 'react';
 import { 
-  Plus, 
-  Minus, 
   Info, 
-  Check,
   ShoppingBag,
-  TrendingUp,
-  Tag,
-  ChevronRight,
   X,
   CreditCard,
   Banknote,
   Wallet
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { formatCurrency } from '../common/CommonUI';
+import { toast, formatCurrency } from '../common/CommonUI';
 import { createPortal } from 'react-dom';
 
 // Utility for smart size sorting
@@ -105,21 +99,23 @@ const HangerIcon = ({ size = 24, ...props }: any) => (
 );
 
 interface Product {
-  variant_id: number;
-  id: string;
+  variant_id: string;
+  product_id: string;
   name: string;
   image?: string;
   category?: string;
+  price_at_sale: number;
+  priceCash?: number;
+  priceDebit?: number;
+  priceCredit?: number;
   pvp?: number;
-  price?: number;
   stock: number;
   size?: string;
   color?: string;
-  prices?: {
-    cash: number;
-    debit: number;
-    credit: number;
-  };
+  
+  // Legacy support for older references
+  variantId?: string;
+  productId?: string;
 }
 
 interface GroupedProduct extends Product {
@@ -137,7 +133,6 @@ interface GroupedProduct extends Product {
 export interface ProductCardProps {
   product: GroupedProduct;
   onAdd: (product: Product) => void;
-  index: number;
   activeProductId?: string | null;
   onOpenModal?: () => void;
   onCloseModal?: () => void;
@@ -174,23 +169,20 @@ export const getCategoryImage = (category: string = '', size: number = 32) => {
     </div>
   );
 };
-
-export const ProductCard: React.FC<ProductCardProps> = ({ 
+export const ProductCard: React.FC<ProductCardProps> = ({ 
   product, 
   onAdd, 
-  index,
   activeProductId,
   onOpenModal,
   onCloseModal
 }) => {
   const [selectedColor, setSelectedColor] = useState<string | null>(null);
   const [selectedVariant, setSelectedVariant] = useState<Product | null>(null);
-  const [modalStyles, setModalStyles] = useState<React.CSSProperties>({});
   
   const cardRef = React.useRef<HTMLDivElement>(null);
   const isModalOpen = useMemo(() => {
-    return activeProductId !== null && activeProductId !== undefined && String(activeProductId) === String(product.id);
-  }, [activeProductId, product.id]);
+    return activeProductId !== null && activeProductId !== undefined && String(activeProductId) === String(product.product_id || (product as any).productId);
+  }, [activeProductId, product.product_id, (product as any).productId]);
 
   const hasImage = !!product.image && product.image !== 'https://picsum.photos/seed/product/100/100';
 
@@ -226,47 +218,30 @@ export const ProductCard: React.FC<ProductCardProps> = ({
     }
   }, [isModalOpen, colors, selectedColor]);
 
-  useEffect(() => {
-    if (isModalOpen && cardRef.current) {
-      const rect = cardRef.current.getBoundingClientRect();
-      const windowWidth = window.innerWidth;
-      const windowHeight = window.innerHeight;
-      const modalWidth = 320; // Increased width for the new design
-      
-      const isLeftHalf = rect.left + rect.width / 2 < windowWidth / 2;
-      let top = rect.top - 20;
-      let left = 0;
-      
-      if (isLeftHalf) {
-        left = rect.right + 12;
-      } else {
-        left = rect.left - modalWidth - 12;
-      }
-      
-      const margin = 12;
-      if (left < margin) left = margin;
-      if (left + modalWidth > windowWidth - margin) {
-        left = windowWidth - modalWidth - margin;
-      }
-      
-      const approximateHeight = 520;
-      if (top + approximateHeight > windowHeight - margin) {
-        top = windowHeight - approximateHeight - margin;
-      }
-      if (top < margin) top = margin;
-
-      setModalStyles({
-        top: `${top}px`,
-        left: `${left}px`,
-        width: `${modalWidth}px`
-      });
-    }
-  }, [isModalOpen]);
 
   const handleCardClick = (e: React.MouseEvent) => {
     e.stopPropagation();
-    if (product.variants.length === 1 && product.variants[0].stock > 0) {
-      onAdd(product.variants[0]);
+
+    if (product.totalStock <= 0) {
+      toast.error('Este producto está agotado y no puede seleccionarse.');
+      return;
+    }
+
+    const v = product.variants[0];
+    const price = Number(v?.price_at_sale || v?.priceCash || v?.pvp || 0);
+    
+    if (product.variants.length === 1 && v.stock > 0 && price > 0) {
+      // Prepare strictly compliant item
+      const itemToAdd = {
+        ...v,
+        price_at_sale: price
+      };
+      // Delete legacy keys just in case they slipped in
+      delete (itemToAdd as any).variantId;
+      delete (itemToAdd as any).productId;
+      delete (itemToAdd as any).price;
+
+      onAdd(itemToAdd);
     } else {
       onOpenModal?.();
     }
@@ -285,14 +260,9 @@ export const ProductCard: React.FC<ProductCardProps> = ({
     return CATEGORY_VISUALS[key] || CATEGORY_VISUALS['DEFAULT'];
   }, [product.category]);
 
-  const prices = useMemo(() => {
-    const cash = product.displayPrices?.cash || 0;
-    return {
-      cash,
-      debit: product.displayPrices?.debit || cash,
-      credit: product.displayPrices?.credit || cash
-    };
-  }, [product.displayPrices]);
+  const priceCash = product.displayPrices?.cash || product.priceCash || 0;
+  const priceDebit = product.displayPrices?.debit || product.priceDebit || 0;
+  const priceCredit = product.displayPrices?.credit || product.priceCredit || 0;
 
   return (
     <>
@@ -333,27 +303,27 @@ export const ProductCard: React.FC<ProductCardProps> = ({
 
         {/* INFO SECTION */}
         <div className="flex-1 flex flex-col">
-          <span className="text-[9px] font-black uppercase tracking-[0.2em] opacity-60 mb-1.5 block" style={{ color: currentVisual.color.replace('text-', '') }}>
+          <span className="text-[10px] font-black uppercase tracking-[0.2em] mb-1.5 block" style={{ color: currentVisual.color.replace('text-', '') }}>
             {product.category || 'General'}
           </span>
           
-          <h4 className="text-[14px] font-bold text-slate-800 leading-tight mb-4 line-clamp-2 min-h-[2.4em] font-sans">
+          <h4 className="text-[14px] font-black text-slate-900 leading-tight mb-4 line-clamp-2 min-h-[2.4em] font-sans">
             {product.name}
           </h4>
           
           {/* 3 PRICES LIST (Grid View) */}
           <div className="space-y-1.5 mb-2">
-            <div className="flex items-center justify-between text-[11px] font-bold">
-              <span className="text-emerald-600 uppercase tracking-widest text-[9px]">Efectivo</span>
-              <span className="text-emerald-700 font-mono tracking-tighter">{formatCurrency(prices.cash)}</span>
+            <div className="flex items-center justify-between text-[11px] font-black">
+              <span className="text-emerald-700 uppercase tracking-widest text-[10px]">Efectivo</span>
+              <span className="text-emerald-900 font-mono tracking-tighter text-[13px]">{formatCurrency(priceCash)}</span>
             </div>
-            <div className="flex items-center justify-between text-[11px] font-bold">
-              <span className="text-blue-600 uppercase tracking-widest text-[9px]">Débito</span>
-              <span className="text-blue-700 font-mono tracking-tighter">{formatCurrency(prices.debit)}</span>
+            <div className="flex items-center justify-between text-[11px] font-black">
+              <span className="text-blue-700 uppercase tracking-widest text-[10px]">Débito</span>
+              <span className="text-blue-900 font-mono tracking-tighter text-[13px]">{formatCurrency(priceDebit)}</span>
             </div>
-            <div className="flex items-center justify-between text-[11px] font-bold">
-              <span className="text-purple-600 uppercase tracking-widest text-[9px]">Crédito</span>
-              <span className="text-purple-700 font-mono tracking-tighter">{formatCurrency(prices.credit)}</span>
+            <div className="flex items-center justify-between text-[11px] font-black">
+              <span className="text-purple-700 uppercase tracking-widest text-[10px]">Crédito</span>
+              <span className="text-purple-900 font-mono tracking-tighter text-[13px]">{formatCurrency(priceCredit)}</span>
             </div>
           </div>
         </div>
@@ -419,7 +389,7 @@ export const ProductCard: React.FC<ProductCardProps> = ({
                         <span className="text-[8px] font-black text-white uppercase tracking-widest">Efectivo</span>
                       </div>
                       <span className="text-[15px] font-black text-white font-mono tracking-tighter">
-                        {formatCurrency(selectedVariant?.prices?.cash || prices.cash)}
+                        {formatCurrency(selectedVariant?.price_at_sale || (product as any).price_at_sale || (product as any).priceCash || 0)}
                       </span>
                    </div>
 
@@ -430,7 +400,7 @@ export const ProductCard: React.FC<ProductCardProps> = ({
                         <span className="text-[8px] font-black text-white uppercase tracking-widest">Débito</span>
                       </div>
                       <span className="text-[15px] font-black text-white font-mono tracking-tighter">
-                        {formatCurrency(selectedVariant?.prices?.debit || selectedVariant?.prices?.cash || prices.debit)}
+                        {formatCurrency(selectedVariant?.priceDebit || priceDebit)}
                       </span>
                    </div>
 
@@ -441,7 +411,7 @@ export const ProductCard: React.FC<ProductCardProps> = ({
                         <span className="text-[8px] font-black text-white uppercase tracking-widest">Crédito</span>
                       </div>
                       <span className="text-[15px] font-black text-white font-mono tracking-tighter">
-                        {formatCurrency(selectedVariant?.prices?.credit || selectedVariant?.prices?.cash || prices.credit)}
+                        {formatCurrency(selectedVariant?.priceCredit || priceCredit)}
                       </span>
                    </div>
                 </div>
@@ -496,14 +466,17 @@ export const ProductCard: React.FC<ProductCardProps> = ({
                         {colorGroups[selectedColor]?.sort((a, b) => compareSizes(a.size || '', b.size || '')).map((v) => (
                           <button
                             key={v.variant_id}
-                            disabled={v.stock === 0}
                             onClick={(e) => {
                               e.stopPropagation();
+                              if (v.stock === 0) {
+                                toast.error(`El talle ${v.size || 'Único'} está agotado.`);
+                                return;
+                              }
                               setSelectedVariant(v);
                             }}
                             className={`py-3 rounded-2xl border flex flex-col items-center justify-center transition-all ${
                               v.stock === 0
-                                ? 'border-slate-100 bg-slate-50 text-slate-300 cursor-not-allowed opacity-30'
+                                ? 'border-slate-100 bg-slate-50 text-slate-300 cursor-not-allowed opacity-40'
                                 : selectedVariant?.variant_id === v.variant_id
                                   ? 'border-primary bg-primary text-white font-black shadow-lg shadow-primary/20'
                                   : 'border-slate-100 bg-white text-slate-500 hover:border-primary/30 hover:text-primary'
@@ -521,22 +494,35 @@ export const ProductCard: React.FC<ProductCardProps> = ({
                 {/* Footer Action */}
                 <div className="mt-8 pt-6 border-t border-white/10">
                   <button
-                    disabled={!selectedVariant || selectedVariant.stock === 0}
+                    disabled={!selectedVariant || selectedVariant.stock === 0 || (Number(selectedVariant.priceCash || selectedVariant.pvp || 0) <= 0)}
                     onClick={(e) => {
                       e.stopPropagation();
-                      if (selectedVariant && selectedVariant.stock > 0) {
-                        onAdd(selectedVariant);
+                      const price = Number(selectedVariant?.price_at_sale || selectedVariant?.priceCash || selectedVariant?.pvp || 0);
+                      if (selectedVariant && selectedVariant.stock > 0 && price > 0) {
+                        // Prepare strictly compliant item
+                        const itemToAdd = {
+                          ...selectedVariant,
+                          price_at_sale: price
+                        };
+                        // Delete legacy keys
+                        delete (itemToAdd as any).variantId;
+                        delete (itemToAdd as any).productId;
+                        delete (itemToAdd as any).price;
+
+                        onAdd(itemToAdd);
                         onCloseModal?.();
+                      } else if (price <= 0) {
+                        toast.error("Este producto no tiene un precio válido");
                       }
                     }}
                     className={`w-full py-4 rounded-[1.5rem] flex items-center justify-center gap-3 text-[14px] font-black uppercase tracking-widest transition-all ${
-                      !selectedVariant || selectedVariant.stock === 0
+                      !selectedVariant || selectedVariant.stock === 0 || (Number(selectedVariant.price_at_sale || selectedVariant.priceCash || selectedVariant.pvp || 0) <= 0)
                         ? 'bg-slate-100 text-slate-300 cursor-not-allowed'
                         : 'bg-primary text-white hover:scale-[1.02] active:scale-[0.98] shadow-xl shadow-primary/20'
                     }`}
                   >
                     <ShoppingBag size={18} />
-                    <span>Añadir al Carrito</span>
+                    <span>{Number(selectedVariant?.priceCash || selectedVariant?.pvp || 0) <= 0 ? 'Sin Precio' : 'Añadir al Carrito'}</span>
                   </button>
                 </div>
               </motion.div>

@@ -258,7 +258,7 @@ export function ProductDetailDrawer({ product, isOpen, onClose, onEdit }: Produc
                           </div>
                           <div>
                             <p style={{ fontSize: '11px', fontWeight: 900, color: '#94a3b8', textTransform: 'uppercase', margin: '0 0 4px 0' }}>Efectivo</p>
-                            <p style={{ fontSize: '42px', fontWeight: 900, color: '#1a1a2e', margin: 0 }}>{formatCurrency(product.price_cash || 0)}</p>
+                            <p style={{ fontSize: '42px', fontWeight: 900, color: '#1a1a2e', margin: 0 }}>{formatCurrency(product.priceCash || 0)}</p>
                           </div>
                         </div>
 

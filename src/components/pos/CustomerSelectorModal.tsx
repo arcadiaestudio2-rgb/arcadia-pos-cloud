@@ -27,6 +27,14 @@ export const CustomerSelectorModal: React.FC<CustomerSelectorModalProps> = ({
     }
   }, [isOpen]);
 
+  useEffect(() => {
+    const handleRefresh = () => {
+      if (isOpen) loadInitialCustomers();
+    };
+    window.addEventListener('refresh-clients', handleRefresh);
+    return () => window.removeEventListener('refresh-clients', handleRefresh);
+  }, [isOpen]);
+
   const loadInitialCustomers = async () => {
     setLoading(true);
     try {

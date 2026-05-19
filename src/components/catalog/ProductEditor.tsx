@@ -1,32 +1,13 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import { useState, useMemo, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   Package, 
-  TrendingUp, 
-  AlertTriangle, 
-  CheckCircle2, 
-  ArrowRight,
-  ChevronDown,
   Info,
-  History,
   DollarSign,
   Plus,
-  Minus,
-  ChevronRight,
   ArrowLeft,
-  LayoutGrid,
-  List,
-  PackagePlus,
   RotateCcw,
-  PlusCircle,
-  MinusCircle,
   Trash2,
-  ShieldAlert,
-  MessageSquare,
-  Percent,
-  Keyboard,
-  Calendar,
-  Tag,
   Barcode,
   Eye,
   Truck,
@@ -45,21 +26,22 @@ import {
 // Utility for smart size sorting moved to utils/format.ts
 import { api } from '../../services/api';
 import { Button, toast, formatCurrency, formatDate, compareSizes } from '../common/CommonUI';
+import { useOperator } from '../../context/OperatorContext';
 
-import { calculatePVP, calculateMargin, calculateDebitPrice, calculateCreditPrice } from '../../utils/pricing';
+import { calculatePriceCash, calculateMargin } from '../../utils/pricing';
 
 interface VariantRow {
   id: string;
   sku: string;
   color: string;
   size: string;
-  stock: number;
-  stock_minimo: number;
-  cost: number;
-  margin: number;
-  pvp: number;
-  debitPrice: number;
-  creditPrice: number;
+  stock: number | string;
+  stockMinimo: number | string;
+  cost: number | string;
+  margin: number | string;
+  priceCash: number | string;
+  priceDebit: number | string;
+  priceCredit: number | string;
   isCustom?: boolean;
 }
 
@@ -109,19 +91,33 @@ const getColorCode = (colorName: string) => {
 };
 
 export function ProductEditor({ product, onClose }: { product?: any, onClose: () => void }) {
+  const { selectedOperator } = useOperator();
+  const operatorId = typeof selectedOperator === 'object' ? String(selectedOperator?.id || '0') : '0';
+  
   // --- Form State ---
   const [productName, setProductName] = useState('');
   const [categoryId, setCategoryId] = useState('');
   const [brand, setBrand] = useState('');
   const [season, setSeason] = useState('');
   const [barcode, setBarcode] = useState('');
-  const [baseCost, setBaseCost] = useState(0);
-  const [baseMargin, setBaseMargin] = useState(60); 
-  const [baseStockMin, setBaseStockMin] = useState(5); 
+  const [baseCost, setBaseCost] = useState<number | string>('0');
+  const [baseMargin, setBaseMargin] = useState<number | string>('60'); 
+  const [baseStockMin, setBaseStockMin] = useState<number | string>('5'); 
   const [ivaRate, setIvaRate] = useState(21); 
   const [loading, setLoading] = useState(false);
   const [errors, setErrors] = useState<string[]>([]);
-  const [dbAttributes, setDbAttributes] = useState(DEFAULT_ATTRIBUTES);
+  const [dbAttributes, setDbAttributes] = useState(() => {
+    const saved = localStorage.getItem('arcadia_catalog_attributes');
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch (e) {
+        return DEFAULT_ATTRIBUTES;
+      }
+    }
+    return DEFAULT_ATTRIBUTES;
+  });
+
   const [fees] = useState(() => {
     const saved = localStorage.getItem('arcadia_fees');
     return saved ? JSON.parse(saved) : {
@@ -136,10 +132,6 @@ export function ProductEditor({ product, onClose }: { product?: any, onClose: ()
   const [selectedSupplierId, setSelectedSupplierId] = useState<string>('');
   const [invoiceNumber, setInvoiceNumber] = useState<string>('');
   const [showNewSupplierForm, setShowNewSupplierForm] = useState<boolean>(false);
-  const [newSupplierName, setNewSupplierName] = useState<string>('');
-  const [newSupplierCuit, setNewSupplierCuit] = useState<string>('');
-  const [newSupplierPhone, setNewSupplierPhone] = useState<string>('');
-  const [sizeType, setSizeType] = useState<'alpha' | 'numeric'>('alpha');
   const [showNewAttributeForm, setShowNewAttributeForm] = useState<string | null>(null);
 
   const toggleAttribute = (type: 'sizes' | 'colors', value: string) => {
@@ -156,9 +148,14 @@ export function ProductEditor({ product, onClose }: { product?: any, onClose: ()
   const [selectedColors, setSelectedColors] = useState<string[]>([]);
   const [variants, setVariants] = useState<VariantRow[]>([]);
   const [selectedVariantIds, setSelectedVariantIds] = useState<Set<string>>(new Set());
-  const [basePrice, setBasePrice] = useState(0);
-  const [baseDebitPrice, setBaseDebitPrice] = useState(0);
-  const [baseCreditPrice, setBaseCreditPrice] = useState(0);
+  const [basePrice, setBasePrice] = useState<number | string>('0');
+  const [basePriceDebit, setBasePriceDebit] = useState<number | string>('0');
+  const [basePriceCredit, setBasePriceCredit] = useState<number | string>('0');
+  
+  // --- Supplier State ---
+  const [newSupplierName, setNewSupplierName] = useState<string>('');
+  const [newSupplierCuit, setNewSupplierCuit] = useState<string>('');
+  const [newSupplierPhone, setNewSupplierPhone] = useState<string>('');
   
   
   const currentSizeType = useMemo(() => {
@@ -180,17 +177,6 @@ export function ProductEditor({ product, onClose }: { product?: any, onClose: ()
   // Load attributes from DB
   const loadAttributes = async () => {
     try {
-      // getCatalogAttributes() returns a grouped object { brands: [], seasons: [], ... }
-      // NOT an array — calling .reduce() on it causes TypeError.
-      const grouped = await api.getCatalogAttributes();
-      if (grouped && typeof grouped === 'object' && !Array.isArray(grouped)) {
-        setDbAttributes((prev: any) => ({ ...prev, ...grouped }));
-      }
-    } catch (err) {
-      // On error, DEFAULT_ATTRIBUTES remain — no crash, no white screen.
-      console.warn('[ProductEditor] Could not load DB attributes, using defaults:', err);
-    }
-    try {
       const supp = await api.getSuppliers();
       setSuppliers(supp || []);
     } catch (err) {
@@ -198,7 +184,9 @@ export function ProductEditor({ product, onClose }: { product?: any, onClose: ()
     }
   };
 
-  useEffect(() => { loadAttributes(); }, []);
+  useEffect(() => { 
+    loadAttributes(); 
+  }, []);
 
   // Initialize for editing
   useEffect(() => {
@@ -212,7 +200,7 @@ export function ProductEditor({ product, onClose }: { product?: any, onClose: ()
       // Link base_price to the Cost field as requested
       setBaseCost(product.cost || 0);
       setBaseMargin(product.base_margin || 60);
-      // setBaseStockMin(product.total_stock_minimo || 5);
+      // setBaseStockMin(product.total_stockMinimo || 5);
       
       // Initialize Master Price (Cash)
       setBasePrice(product.base_price || 0);
@@ -229,8 +217,8 @@ export function ProductEditor({ product, onClose }: { product?: any, onClose: ()
           
           // Load manual price overrides if they exist
           if (pInfo && pInfo.manual_prices) {
-            setBaseDebitPrice(pInfo.manual_prices.debito || pInfo.manual_prices.debit || 0);
-            setBaseCreditPrice(pInfo.manual_prices.credito || pInfo.manual_prices.credit || 0);
+            setBasePriceDebit(pInfo.manual_prices.debito || pInfo.manual_prices.debit || 0);
+            setBasePriceCredit(pInfo.manual_prices.credito || pInfo.manual_prices.credit || 0);
           }
         } catch (e) {
           console.error('[Editor] Error parsing provider_info:', e);
@@ -244,13 +232,13 @@ export function ProductEditor({ product, onClose }: { product?: any, onClose: ()
             color: v.color,
             size: v.size,
             stock: v.stock || 0,
-            stock_minimo: v.stock_minimo || 0,
+            stockMinimo: v.stockMinimo || 0,
             cost: v.cost || product?.cost || 0,
             margin: v.margin || product?.base_margin || 60,
-            pvp: v.pvp || product?.cost || 0,
-            debitPrice: v.debitPrice || 0,
-            creditPrice: v.creditPrice || 0,
-            isCustom: v.cost !== (product?.cost || 0) || v.margin !== (product?.base_margin || 60)
+            priceCash: v.pvp || v.priceCash || product?.cost || 0,
+            priceDebit: v.debit_price || v.priceDebit || 0,
+            priceCredit: v.credit_price || v.priceCredit || 0,
+            isCustom: Number(v.cost) !== (Number(product?.cost) || 0) || Number(v.margin) !== (Number(product?.base_margin) || 60)
          })));
          
          const sizes = Array.from(new Set(vData.map((v: any) => v.size)));
@@ -280,24 +268,21 @@ export function ProductEditor({ product, onClose }: { product?: any, onClose: ()
     return true;
   };
 
-  const [barcodeWarning, setBarcodeWarning] = useState<{ id: number; name: string } | null>(null);
-  const [checkingBarcode, setCheckingBarcode] = useState(false);
+  const [barcodeWarning, setBarcodeWarning] = useState<{ uuid: string; name: string } | null>(null);
   const [matrixFilter, setMatrixFilter] = useState('');
 
   const checkBarcode = async (val: string) => {
     if (!val || product) return;
-    setCheckingBarcode(true);
     try {
       const existing = await api.getProductByBarcode(val);
       if (existing) {
-        setBarcodeWarning({ id: existing.id, name: existing.name });
+        setBarcodeWarning({ uuid: (existing as any).id, name: existing.name });
       } else {
         setBarcodeWarning(null);
       }
     } catch (error) {
       setBarcodeWarning(null);
     } finally {
-      setCheckingBarcode(false);
     }
   };
 
@@ -307,9 +292,12 @@ export function ProductEditor({ product, onClose }: { product?: any, onClose: ()
     setBrand('');
     setSeason('');
     setBarcode('');
-    setBaseCost(0);
-    setBaseMargin(60);
-    setBaseStockMin(5);
+    setBaseCost('0');
+    setBaseMargin('60');
+    setBaseStockMin('5');
+    setBasePrice('0');
+    setBasePriceDebit('0');
+    setBasePriceCredit('0');
     setIvaRate(21);
     setSelectedSizes([]);
     setSelectedColors([]);
@@ -410,70 +398,70 @@ export function ProductEditor({ product, onClose }: { product?: any, onClose: ()
       // Force Number casting for all numeric fields
       const finalBasePrice = Number(basePrice) || 0;
       const finalBaseCost = Number(baseCost) || 0;
-      const finalBaseMargin = Number(baseMargin) || 0;
+      const finalBasePriceDebit = Number(basePriceDebit) || (finalBasePrice * (1 + (fees.debitSurcharge / 100)));
+      const finalBasePriceCredit = Number(basePriceCredit) || (finalBasePrice * (1 + (fees.creditSurcharges[1] / 100)));
       const finalIvaRate = Number(ivaRate) || 21;
-      const finalBaseStockMin = Number(baseStockMin) || 5;
       
-      // Instruction 3: Silent Fallbacks
       const finalCategory = categoryId || 'General';
       const finalBarcode = barcode.trim() || `GEN-${Date.now()}`;
 
       const variantPayload = variants.map(v => {
         return {
-          // id undefined → INSERT new; numeric id → UPSERT existing
-          id: v.id.startsWith('new-') ? undefined : Number(v.id),
+          id: v.id.startsWith('new-') ? undefined : String(v.id),
           sku: v.sku.trim(),
           size: v.size,
           color: v.color,
           stock: Number(v.stock) || 0,
-          stock_minimo: Number(v.stock_minimo) || 5,
+          stockMinimo: Number(v.stockMinimo) || 5,
           cost: Number(v.cost) || 0,
           margin: Number(v.margin) || 0,
-          pvp: Number(v.pvp) || 0,
-          debitPrice: Number(v.debitPrice) || 0,
-          creditPrice: Number(v.creditPrice) || 0
+          priceCash: Number(v.priceCash) || 0,
+          priceDebit: Number(v.priceDebit) || 0,
+          priceCredit: Number(v.priceCredit) || 0,
         };
       });
 
-      // IMPORTANT: Only columns that exist in the 'products' table.
       const payload = {
         name: productName.trim(),
         category: finalCategory,
         brand,
         season,
         barcode: finalBarcode,
-        iva_rate: finalIvaRate,
-        base_price: finalBasePrice, // NOT NULL column — must be included
-        price_cash: finalBasePrice,
-        price_debit: Number(baseDebitPrice) || 0,
-        price_credit: Number(baseCreditPrice) || 0,
+        ivaRate: finalIvaRate,
+        basePrice: finalBasePrice,
+        priceCash: finalBasePrice,
+        priceDebit: finalBasePriceDebit,
+        priceCredit: finalBasePriceCredit,
         cost: finalBaseCost,
-        base_margin: calculateMargin(finalBaseCost, finalBasePrice, finalIvaRate),
-        // total_stock_minimo: finalBaseStockMin,
-        provider_info: {
-          id: selectedSupplierId ? Number(selectedSupplierId) : null,
+        baseMargin: calculateMargin(finalBaseCost, finalBasePrice, finalIvaRate),
+        providerInfo: {
+          id: selectedSupplierId ? String(selectedSupplierId) : null,
           remito: invoiceNumber,
           manual_prices: {
             efectivo: finalBasePrice,
-            debito: Number(baseDebitPrice) || 0,
-            credito: Number(baseCreditPrice) || 0
+            debito: finalBasePriceDebit,
+            credito: finalBasePriceCredit
           }
         },
-        variants: variantPayload, // api.ts will separate this before DB insert
+        variants: variantPayload,
       };
 
       if (product) {
-        await api.updateProduct(product.id, payload);
+        await api.updateProduct(product.id, {
+          ...payload,
+          operatorId: operatorId
+        });
         toast.success(`"${productName}" actualizado correctamente`);
         // Trigger global refresh for UI consistency
         window.dispatchEvent(new CustomEvent('refresh-stock'));
-        onClose();
+        
+        // Pequeño delay para asegurar que el evento se procese antes de cerrar
+        setTimeout(() => onClose(), 100);
       } else {
         await api.createProduct(payload);
+
         toast.success(`"${productName}" creado con éxito en el catálogo`);
-        // Trigger global refresh for UI consistency
         window.dispatchEvent(new CustomEvent('refresh-stock'));
-        // Instruction 11: clearFields() after successful save
         clearFields();
       }
     } catch (error: any) {
@@ -489,8 +477,10 @@ export function ProductEditor({ product, onClose }: { product?: any, onClose: ()
 
   const handleAddAttribute = async (type: string, value: string) => {
     try {
-      await api.addCatalogAttribute(type, value);
-      setDbAttributes((p: any) => ({ ...p, [type]: [...(p[type] || []), value] }));
+      const updated = { ...dbAttributes, [type]: [...(dbAttributes[type] || []), value] };
+      setDbAttributes(updated);
+      localStorage.setItem('arcadia_catalog_attributes', JSON.stringify(updated));
+      window.dispatchEvent(new CustomEvent('refresh-attributes'));
       toast.success(`${value} agregado`);
     } catch (error) {
       toast.error('Error al guardar atributo');
@@ -500,11 +490,13 @@ export function ProductEditor({ product, onClose }: { product?: any, onClose: ()
   const handleRemoveAttribute = async (type: string, value: string) => {
     if (!confirm(`¿Estás seguro de eliminar "${value}"?`)) return;
     try {
-      await api.deleteCatalogAttribute(type, value);
-      setDbAttributes((p: any) => ({ 
-        ...p, 
-        [type]: p[type].filter((v: string) => v !== value) 
-      }));
+      const updated = { 
+        ...dbAttributes, 
+        [type]: dbAttributes[type].filter((v: string) => v !== value) 
+      };
+      setDbAttributes(updated);
+      localStorage.setItem('arcadia_catalog_attributes', JSON.stringify(updated));
+      window.dispatchEvent(new CustomEvent('refresh-attributes'));
       toast.success(`${value} eliminado`);
     } catch (error) {
       toast.error('Error al eliminar atributo');
@@ -545,12 +537,12 @@ export function ProductEditor({ product, onClose }: { product?: any, onClose: ()
               sku: generatedSku,
               color, size,
               stock: 0,
-              stock_minimo: baseStockMin,
+              stockMinimo: baseStockMin,
               cost: baseCost,
               margin: baseMargin,
-              pvp: basePrice,
-              debitPrice: baseDebitPrice,
-              creditPrice: baseCreditPrice,
+              priceCash: basePrice,
+              priceDebit: basePriceDebit,
+              priceCredit: basePriceCredit,
               isCustom: false
             });
           }
@@ -568,13 +560,13 @@ export function ProductEditor({ product, onClose }: { product?: any, onClose: ()
       return {
         ...v,
         cost: baseCost,
-        margin: calculateMargin(baseCost, basePrice, ivaRate),
-        pvp: basePrice,
-        debitPrice: baseDebitPrice,
-        creditPrice: baseCreditPrice
+        margin: calculateMargin(Number(baseCost), Number(basePrice), ivaRate),
+        priceCash: basePrice,
+        priceDebit: basePriceDebit,
+        priceCredit: basePriceCredit
       };
     }));
-  }, [baseCost, baseMargin, ivaRate, basePrice, baseDebitPrice, baseCreditPrice]);
+  }, [baseCost, baseMargin, ivaRate, basePrice, basePriceDebit, basePriceCredit]);
 
   const updateVariant = (id: string, field: keyof VariantRow, value: any) => {
     setVariants(prev => {
@@ -585,15 +577,15 @@ export function ProductEditor({ product, onClose }: { product?: any, onClose: ()
       const updatedVariant = { ...next[index], [field]: value };
       
       // Auto-detach if pricing fields change
-      if (field === 'cost' || field === 'margin' || field === 'pvp' || field === 'debitPrice' || field === 'creditPrice') {
+      if (field === 'cost' || field === 'margin' || field === 'priceCash' || field === 'priceDebit' || field === 'priceCredit') {
         updatedVariant.isCustom = true;
       }
 
       if (field === 'cost' || field === 'margin') {
-        updatedVariant.pvp = calculatePVP(updatedVariant.cost, updatedVariant.margin, ivaRate);
-      } else if (field === 'pvp') {
-        // Recalculate margin if PVP is edited directly
-        updatedVariant.margin = calculateMargin(updatedVariant.cost, updatedVariant.pvp, ivaRate);
+        updatedVariant.priceCash = calculatePriceCash(Number(updatedVariant.cost), Number(updatedVariant.margin), ivaRate);
+      } else if (field === 'priceCash') {
+        // Recalculate margin if priceCash is edited directly
+        updatedVariant.margin = calculateMargin(Number(updatedVariant.cost), Number(updatedVariant.priceCash), ivaRate);
       }
       
       next[index] = updatedVariant;
@@ -601,32 +593,7 @@ export function ProductEditor({ product, onClose }: { product?: any, onClose: ()
     });
   };
 
-  const toggleVariantSync = (id: string) => {
-    setVariants(prev => {
-      const index = prev.findIndex(v => v.id === id);
-      if (index === -1) return prev;
-      
-      const next = [...prev];
-      const v = next[index];
-      const newIsCustom = !v.isCustom;
-      
-      if (!newIsCustom) {
-        // Re-linking: reset to base values
-        next[index] = {
-          ...v,
-          isCustom: false,
-          cost: baseCost,
-          margin: baseMargin,
-          pvp: calculatePVP(baseCost, baseMargin, ivaRate),
-          debitPrice: baseDebitPrice,
-          creditPrice: baseCreditPrice
-        };
-      } else {
-        next[index] = { ...v, isCustom: true };
-      }
-      return next;
-    });
-  };
+
 
   const toggleSelection = (id: string) => {
     setSelectedVariantIds(prev => {
@@ -658,13 +625,13 @@ export function ProductEditor({ product, onClose }: { product?: any, onClose: ()
           isCustom: false,
           cost: baseCost,
           margin: baseMargin,
-          pvp: calculatePVP(baseCost, baseMargin, ivaRate),
-          debitPrice: baseDebitPrice,
-          creditPrice: baseCreditPrice
+          priceCash: calculatePriceCash(Number(baseCost), Number(baseMargin), ivaRate),
+          priceDebit: basePriceDebit,
+          priceCredit: basePriceCredit
         };
       }
       if (action === 'unlink') return { ...v, isCustom: true };
-      if (action === 'stock_min') return { ...v, stock_minimo: baseStockMin };
+      if (action === 'stock_min') return { ...v, stockMinimo: baseStockMin };
       
       return v;
     }));
@@ -676,13 +643,33 @@ export function ProductEditor({ product, onClose }: { product?: any, onClose: ()
     setVariants(prev => prev.filter(v => v.id !== id));
   };
 
+  const handleNumberKeyDown = (e: React.KeyboardEvent<HTMLInputElement>, setter: (val: string) => void, currentVal: any) => {
+    if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+      e.preventDefault();
+      const step = e.shiftKey ? 10 : 1;
+      const current = Number(currentVal) || 0;
+      const next = e.key === 'ArrowUp' ? current + step : Math.max(0, current - step);
+      setter(String(next));
+    }
+  };
+
+  const handleVariantKeyDown = (e: React.KeyboardEvent<HTMLInputElement>, id: string, field: keyof VariantRow, currentVal: any) => {
+    if (e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+      e.preventDefault();
+      const step = e.shiftKey ? 10 : 1;
+      const current = Number(currentVal) || 0;
+      const next = e.key === 'ArrowUp' ? current + step : Math.max(0, current - step);
+      updateVariant(id, field, String(next));
+    }
+  };
+
   const sizesToShow = useMemo(() => {
     if (currentSizeType === 'none') return ['U'];
     
     // Filter sizes based on current type to avoid mixing alpha/numeric
-    const sizes = currentSizeType === 'numeric' 
+    const sizes = (currentSizeType === 'numeric' 
       ? (dbAttributes.numeric || [])
-      : (dbAttributes.alpha || []);
+      : (dbAttributes.alpha || [])) as string[];
       
     return Array.from(new Set(sizes)).sort(compareSizes);
   }, [currentSizeType, dbAttributes]);
@@ -1145,11 +1132,13 @@ export function ProductEditor({ product, onClose }: { product?: any, onClose: ()
                   <div className="flex items-baseline gap-1.5">
                     <span className="text-lg font-black text-slate-700">$</span>
                     <input 
-                      type="number"
+                      type="text"
+                      inputMode="decimal"
                       className="bg-transparent text-2xl font-black text-white outline-none w-full placeholder:text-slate-800"
                       placeholder="0.00"
-                      value={baseCost || ''}
-                      onChange={(e) => setBaseCost(parseFloat(e.target.value) || 0)}
+                      value={baseCost}
+                      onChange={(e) => setBaseCost(e.target.value)}
+                      onKeyDown={(e) => handleNumberKeyDown(e, setBaseCost, baseCost)}
                     />
                   </div>
                 </div>
@@ -1160,11 +1149,13 @@ export function ProductEditor({ product, onClose }: { product?: any, onClose: ()
                   <div className="flex items-baseline gap-1.5">
                     <span className="text-lg font-black text-primary/40">$</span>
                     <input 
-                      type="number"
+                      type="text"
+                      inputMode="decimal"
                       className="bg-transparent text-2xl font-black text-white outline-none w-full placeholder:text-slate-800"
                       placeholder="0.00"
-                      value={basePrice || ''}
-                      onChange={(e) => setBasePrice(parseFloat(e.target.value) || 0)}
+                      value={basePrice}
+                      onChange={(e) => setBasePrice(e.target.value)}
+                      onKeyDown={(e) => handleNumberKeyDown(e, setBasePrice, basePrice)}
                     />
                   </div>
                 </div>
@@ -1175,11 +1166,13 @@ export function ProductEditor({ product, onClose }: { product?: any, onClose: ()
                   <div className="flex items-baseline gap-1.5">
                     <span className="text-lg font-black text-slate-700">$</span>
                     <input 
-                      type="number"
+                      type="text"
+                      inputMode="decimal"
                       className="bg-transparent text-2xl font-black text-white outline-none w-full placeholder:text-slate-800"
                       placeholder="0.00"
-                      value={baseDebitPrice || ''}
-                      onChange={(e) => setBaseDebitPrice(parseFloat(e.target.value) || 0)}
+                      value={basePriceDebit}
+                      onChange={(e) => setBasePriceDebit(e.target.value)}
+                      onKeyDown={(e) => handleNumberKeyDown(e, setBasePriceDebit, basePriceDebit)}
                     />
                   </div>
                 </div>
@@ -1190,11 +1183,13 @@ export function ProductEditor({ product, onClose }: { product?: any, onClose: ()
                   <div className="flex items-baseline gap-1.5">
                     <span className="text-lg font-black text-slate-700">$</span>
                     <input 
-                      type="number"
+                      type="text"
+                      inputMode="decimal"
                       className="bg-transparent text-2xl font-black text-white outline-none w-full placeholder:text-slate-800"
                       placeholder="0.00"
-                      value={baseCreditPrice || ''}
-                      onChange={(e) => setBaseCreditPrice(parseFloat(e.target.value) || 0)}
+                      value={basePriceCredit}
+                      onChange={(e) => setBasePriceCredit(e.target.value)}
+                      onKeyDown={(e) => handleNumberKeyDown(e, setBasePriceCredit, basePriceCredit)}
                     />
                   </div>
                 </div>
@@ -1203,9 +1198,9 @@ export function ProductEditor({ product, onClose }: { product?: any, onClose: ()
               <div className="mt-6 flex justify-end">
                 <button 
                   onClick={() => {
-                    const cash = basePrice;
-                    setBaseDebitPrice(Number((cash * (1 + fees.debitSurcharge / 100)).toFixed(0)));
-                    setBaseCreditPrice(Number((cash * (1 + fees.creditSurcharges[1] / 100)).toFixed(0)));
+                    const cash = Number(basePrice) || 0;
+                    setBasePriceDebit((cash * (1 + fees.debitSurcharge / 100)).toFixed(0));
+                    setBasePriceCredit((cash * (1 + fees.creditSurcharges[1] / 100)).toFixed(0));
                     toast.success('Sugerencias aplicadas');
                   }}
                   className="group flex items-center gap-2 text-[9px] font-black text-slate-600 tracking-widest hover:text-primary transition-all bg-slate-900/50 px-4 py-2.5 rounded-xl border border-slate-800"
@@ -1307,7 +1302,7 @@ export function ProductEditor({ product, onClose }: { product?: any, onClose: ()
                   </AnimatePresence>
                   
                   <div className="flex flex-wrap gap-2">
-                    {sizesToShow.map((size: string) => {
+                    {(sizesToShow as string[]).map((size: string) => {
                       const isSelected = selectedSizes.includes(size);
                       return (
                         <div key={size} className="relative group/attr">
@@ -1446,7 +1441,7 @@ export function ProductEditor({ product, onClose }: { product?: any, onClose: ()
                           </div>
                          <div className="h-1 w-1 rounded-full bg-slate-300" />
                          <span className="text-[10px] font-bold text-primary tracking-widest flex items-center gap-1">
-                           <DollarSign size={10} /> Base: {formatCurrency(basePrice)}
+                           <DollarSign size={10} /> Base: {formatCurrency(Number(basePrice))}
                          </span>
                        </div>
                      </div>
@@ -1508,7 +1503,7 @@ export function ProductEditor({ product, onClose }: { product?: any, onClose: ()
                                if (colorCompare !== 0) return colorCompare;
                                return compareSizes(a.size, b.size);
                              })
-                             .map((v, index) => (
+                             .map((v) => (
                                 <motion.tr 
                                   layout
                                   initial={{ opacity: 0, y: 10 }}
@@ -1545,12 +1540,14 @@ export function ProductEditor({ product, onClose }: { product?: any, onClose: ()
                                    <td className="px-4 py-4">
                                       <div className="relative group/input flex justify-center">
                                         <input 
-                                         type="number"
+                                         type="text"
+                                         inputMode="numeric"
                                          className="w-20 h-10 bg-white border border-slate-200 text-sm font-black text-slate-800 rounded-xl px-2 text-center focus:border-primary/50 focus:ring-4 focus:ring-primary/5 outline-none transition-all shadow-sm group-hover/input:border-slate-300"
                                          value={v.stock}
-                                         onChange={(e) => updateVariant(v.id, 'stock', Number(e.target.value))}
+                                         onChange={(e) => updateVariant(v.id, 'stock', e.target.value)}
+                                         onKeyDown={(e) => handleVariantKeyDown(e, v.id, 'stock', v.stock)}
                                         />
-                                        {v.stock <= v.stock_minimo && v.stock > 0 && (
+                                        {Number(v.stock) <= Number(v.stockMinimo) && Number(v.stock) > 0 && (
                                           <div className="absolute -top-1 -right-1 w-2.5 h-2.5 bg-error rounded-full border-2 border-white animate-pulse" />
                                         )}
                                       </div>
@@ -1558,10 +1555,12 @@ export function ProductEditor({ product, onClose }: { product?: any, onClose: ()
                                    <td className="px-4 py-4">
                                       <div className="flex justify-center">
                                         <input 
-                                          type="number"
+                                          type="text"
+                                          inputMode="numeric"
                                           className="w-16 h-10 bg-slate-50/50 border border-slate-100 text-xs font-bold text-slate-500 rounded-xl px-2 text-center focus:bg-white focus:border-slate-300 focus:ring-4 focus:ring-slate-100 outline-none transition-all shadow-inner"
-                                          value={v.stock_minimo}
-                                          onChange={(e) => updateVariant(v.id, 'stock_minimo', Number(e.target.value))}
+                                          value={v.stockMinimo}
+                                          onChange={(e) => updateVariant(v.id, 'stockMinimo', e.target.value)}
+                                          onKeyDown={(e) => handleVariantKeyDown(e, v.id, 'stockMinimo', v.stockMinimo)}
                                         />
                                       </div>
                                    </td>
@@ -1569,10 +1568,12 @@ export function ProductEditor({ product, onClose }: { product?: any, onClose: ()
                                       <div className="flex items-center bg-slate-50/50 rounded-xl border border-slate-100 p-1 group-hover:border-slate-200 transition-all">
                                         <span className="text-[9px] font-black text-slate-300 ml-2 mr-1">$</span>
                                         <input 
-                                          type="number"
+                                          type="text"
+                                          inputMode="decimal"
                                           className="w-20 text-right bg-transparent border-none p-1.5 text-xs font-bold text-slate-600 focus:ring-0"
                                           value={v.cost}
-                                          onChange={(e) => updateVariant(v.id, 'cost', Number(e.target.value))}
+                                          onChange={(e) => updateVariant(v.id, 'cost', e.target.value)}
+                                          onKeyDown={(e) => handleVariantKeyDown(e, v.id, 'cost', v.cost)}
                                         />
                                       </div>
                                    </td>
@@ -1580,10 +1581,12 @@ export function ProductEditor({ product, onClose }: { product?: any, onClose: ()
                                       <div className="relative">
                                         <div className="absolute left-2 top-1/2 -translate-y-1/2 text-[9px] font-black text-primary/40">$</div>
                                         <input 
-                                          type="number"
+                                          type="text"
+                                          inputMode="decimal"
                                           className="w-24 h-10 text-right bg-primary/5 text-primary border-2 border-primary/10 rounded-xl pl-5 pr-2 text-xs font-black focus:border-primary/40 focus:ring-4 focus:ring-primary/5 outline-none transition-all shadow-sm"
-                                          value={v.pvp}
-                                          onChange={(e) => updateVariant(v.id, 'pvp', Number(e.target.value))}
+                                          value={v.priceCash}
+                                          onChange={(e) => updateVariant(v.id, 'priceCash', e.target.value)}
+                                          onKeyDown={(e) => handleVariantKeyDown(e, v.id, 'priceCash', v.priceCash)}
                                         />
                                       </div>
                                    </td>
@@ -1591,10 +1594,12 @@ export function ProductEditor({ product, onClose }: { product?: any, onClose: ()
                                       <div className="relative">
                                         <div className="absolute left-2 top-1/2 -translate-y-1/2 text-[9px] font-black text-slate-400">$</div>
                                         <input 
-                                          type="number"
+                                          type="text"
+                                          inputMode="decimal"
                                           className="w-24 h-10 text-right bg-slate-100 text-slate-700 border border-slate-200 rounded-xl pl-5 pr-2 text-xs font-bold focus:border-slate-400 outline-none transition-all"
-                                          value={v.debitPrice}
-                                          onChange={(e) => updateVariant(v.id, 'debitPrice', Number(e.target.value))}
+                                          value={v.priceDebit}
+                                          onChange={(e) => updateVariant(v.id, 'priceDebit', e.target.value)}
+                                          onKeyDown={(e) => handleVariantKeyDown(e, v.id, 'priceDebit', v.priceDebit)}
                                         />
                                       </div>
                                    </td>
@@ -1602,10 +1607,12 @@ export function ProductEditor({ product, onClose }: { product?: any, onClose: ()
                                       <div className="relative">
                                         <div className="absolute left-2 top-1/2 -translate-y-1/2 text-[9px] font-black text-slate-400">$</div>
                                         <input 
-                                          type="number"
+                                          type="text"
+                                          inputMode="decimal"
                                           className="w-24 h-10 text-right bg-slate-100 text-slate-700 border border-slate-200 rounded-xl pl-5 pr-2 text-xs font-bold focus:border-slate-400 outline-none transition-all"
-                                          value={v.creditPrice}
-                                          onChange={(e) => updateVariant(v.id, 'creditPrice', Number(e.target.value))}
+                                          value={v.priceCredit}
+                                          onChange={(e) => updateVariant(v.id, 'priceCredit', e.target.value)}
+                                          onKeyDown={(e) => handleVariantKeyDown(e, v.id, 'priceCredit', v.priceCredit)}
                                         />
                                       </div>
                                    </td>

@@ -24,7 +24,7 @@ export const SaleTicketModal: React.FC<SaleTicketModalProps> = ({ isOpen, onClos
     const items = saleData.items;
     
     let message = `*ARCADIA POS - Ticket #${sale.id}*\n`;
-    message += `📅 ${new Date(sale.timestamp || Date.now()).toLocaleString()}\n\n`;
+    message += `📅 ${new Date(sale.created_at || Date.now()).toLocaleString()}\n\n`;
     message += `*Detalle:*\n`;
     
     items.forEach(item => {
@@ -44,7 +44,7 @@ export const SaleTicketModal: React.FC<SaleTicketModalProps> = ({ isOpen, onClos
     const sale = saleData.sale;
     const items = saleData.items;
     let content = `ARCADIA POS - Ticket #${sale.id}\n`;
-    content += `Fecha: ${new Date(sale.timestamp || Date.now()).toLocaleString()}\n\n`;
+    content += `Fecha: ${new Date(sale.created_at || Date.now()).toLocaleString()}\n\n`;
     items.forEach(item => {
       content += `${item.name} x${item.quantity} - $${item.price || item.price_at_sale}\n`;
     });

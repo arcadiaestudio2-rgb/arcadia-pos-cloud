@@ -197,7 +197,7 @@ export function ProductPreviewModal({ product, isOpen, onClose, onEdit }: Produc
                               return compareSizes(a.size, b.size);
                             })
                             .map((v) => {
-                          const isLowStock = v.stock <= (v.stock_minimo || 2);
+                          const isLowStock = v.stock <= (v.stockMinimo || 2);
                           return (
                             <tr key={v.id} className="hover:bg-slate-50/50 transition-colors">
                               <td className="px-6 py-4">

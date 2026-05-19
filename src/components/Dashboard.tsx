@@ -28,6 +28,7 @@ import {
 } from 'lucide-react';
 import { toast, StatCard } from './common/CommonUI';
 import { api } from '../services/api';
+import { InstallButton } from './common/InstallButton';
 
 export function Dashboard() {
   const [privacyMode, setPrivacyMode] = useState(false);
@@ -86,7 +87,7 @@ export function Dashboard() {
              </div>
              <div>
                 <h2 className="text-4xl font-black font-headline tracking-tighter text-on-surface">Torre de Control</h2>
-                <p className="text-secondary font-medium text-xs opacity-60">Arcadia BI Central — v4.0 (SQL Enabled)</p>
+                <p className="text-secondary font-medium text-xs opacity-60 uppercase tracking-widest mt-1">ArcadiAPP Indumentaria — Central de Inteligencia</p>
              </div>
           </div>
         </div>
@@ -111,6 +112,8 @@ export function Dashboard() {
           >
              {privacyMode ? <EyeOff size={20} /> : <Eye size={20} />}
           </button>
+          <InstallButton />
+          
           <button 
             onClick={() => toast.success('Generando Reporte Ejecutivo PDF...')}
             className="flex items-center gap-2 px-8 py-3 bg-primary text-white font-black rounded-2xl shadow-xl shadow-primary/20 hover:scale-[1.02] active:scale-95 transition-all text-xs uppercase tracking-[0.2em]"
@@ -349,7 +352,7 @@ export function Dashboard() {
               </div>
               <div className="space-y-2">
                  {stats.deadStock.length > 0 ? stats.deadStock.map(item => (
-                    <div key={item.id} className="flex justify-between items-center py-3 border-b border-slate-50 last:border-0 group">
+                    <div key={item.uuid} className="flex justify-between items-center py-3 border-b border-slate-50 last:border-0 group">
                        <div>
                           <p className="text-xs font-bold text-on-surface uppercase group-hover:text-primary transition-colors">{item.name}</p>
                           <p className="text-[9px] font-bold text-slate-300 uppercase">Sin rotación: {formatLastSale(item.last_sale_date)}</p>

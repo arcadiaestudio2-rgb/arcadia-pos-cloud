@@ -9,7 +9,7 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { formatCurrency } from '../common/CommonUI';
-import { PendingOrder } from './POS';
+import { PendingOrder } from '../../types/cart';
 
 interface PendingOrdersModalProps {
   isOpen: boolean;

@@ -16,7 +16,7 @@ interface AuthContextType {
   user: User | null;
   isAuthenticated: boolean;
   isLoading: boolean;
-  login: (name: string, password: string) => Promise<void>;
+  login: (name: string, password: string, rememberMe?: boolean) => Promise<void>;
   logout: () => void;
   hasPermission: (tab: string) => boolean;
 }
@@ -29,24 +29,33 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [user, setUser] = useState<User | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
-  // Initialize from localStorage for persistence in dev
+  // Initialize from storage for persistence
   useEffect(() => {
-    const savedUser = localStorage.getItem('arcadia_user');
+    const savedUser = localStorage.getItem('arcadia_user') || sessionStorage.getItem('arcadia_user');
     if (savedUser) {
-      setUser(JSON.parse(savedUser));
+      setUser(JSON.parse(savedUser) as User);
     }
     setIsLoading(false);
   }, []);
 
-  const login = async (email: string, password: string) => {
+  const login = async (email: string, password: string, rememberMe: boolean = false) => {
     try {
       if (!email || !password) {
         throw new Error("Por favor, introduce tus credenciales.");
       }
 
-      const userData = await api.login(email.trim(), password);
+      const userData = await api.login(email.trim(), password) as User;
       setUser(userData);
-      localStorage.setItem('arcadia_user', JSON.stringify(userData));
+      
+      const storage = rememberMe ? localStorage : sessionStorage;
+      storage.setItem('arcadia_user', JSON.stringify(userData));
+      
+      // Clear the other storage to avoid conflicts
+      if (rememberMe) {
+        sessionStorage.removeItem('arcadia_user');
+      } else {
+        localStorage.removeItem('arcadia_user');
+      }
     } catch (error: any) {
       console.error("Login failed:", error);
       
@@ -71,9 +80,23 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     } catch (e) {
       console.warn("Error during Supabase signout:", e);
     }
+    
+    // Clear all persistent data
     setUser(null);
     localStorage.clear();
-    window.location.href = '/'; // Reinicia la app en la raíz
+    sessionStorage.clear();
+    
+    // Clear all cookies
+    const cookies = document.cookie.split(";");
+    for (let i = 0; i < cookies.length; i++) {
+      const cookie = cookies[i];
+      const eqPos = cookie.indexOf("=");
+      const name = eqPos > -1 ? cookie.substring(0, eqPos) : cookie;
+      document.cookie = name + "=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=/";
+    }
+    
+    console.log("Session cleared. Redirecting to login...");
+    window.location.href = '/'; // Force a full reload to clear memory state
   };
 
   // All authenticated users have full access

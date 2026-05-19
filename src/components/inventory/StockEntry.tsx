@@ -24,7 +24,7 @@ import { toast } from '../common/CommonUI';
 
 interface EntryItem {
   id: string;
-  variantId: number;
+  variant_id: string;
   sku: string;
   name: string;
   quantity: number;
@@ -103,13 +103,13 @@ export function StockEntry() {
 
   const addItemFromVariant = (v: any) => {
     setItems(prev => {
-      const existing = prev.find(i => i.variantId === v.id);
+      const existing = prev.find(i => i.variant_id === v.id);
       if (existing) {
-        return prev.map(i => i.variantId === v.id ? { ...i, quantity: i.quantity + 1 } : i);
+        return prev.map(i => i.variant_id === v.id ? { ...i, quantity: i.quantity + 1 } : i);
       }
       return [...prev, {
         id: Math.random().toString(36),
-        variantId: v.variant_id || v.id,
+        variant_id: v.variant_id || v.id,
         sku: v.sku,
         name: `${v.name || v.products?.name} (${v.size} - ${v.color})`,
         quantity: 1,
@@ -135,7 +135,7 @@ export function StockEntry() {
 
     try {
       const updates = items.map(i => ({
-        variantId: i.variantId,
+        variantId: i.variant_id,
         quantity: i.quantity,
         type: 'INGRESO' as const,
         reason: `Ingreso de mercadería${selectedSupplier ? ` - Prov: ${selectedSupplier}` : ''}`

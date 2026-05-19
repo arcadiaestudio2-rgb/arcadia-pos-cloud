@@ -1,5 +1,6 @@
 {
   "hosting": {
+    "site": "arcadiapp-indumentaria",
     "public": "dist",
     "ignore": [
       "firebase.json",

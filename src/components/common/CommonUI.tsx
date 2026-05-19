@@ -147,17 +147,25 @@ export const Toaster = () => {
 };
 
 // --- BRAND BLOCK ---
-export const BrandBlock = ({ className = '' }: any) => {
+export const BrandBlock = ({ className = '', light = false }: any) => {
   return (
-    <div className={`flex items-center gap-2 ${className}`}>
-      <div className="w-8 h-8 rounded-lg bg-primary flex items-center justify-center text-white shadow-lg shadow-primary/20">
-        <span className="text-lg">★</span>
+    <div className={`flex items-center gap-3 ${className}`}>
+      <div className="w-12 h-12 rounded-[1.25rem] bg-gradient-to-br from-indigo-500 to-indigo-800 flex items-center justify-center text-white shadow-2xl shadow-indigo-500/20 relative overflow-hidden group shrink-0">
+        {/* Isologo: Minimalist A + Star */}
+        <svg viewBox="0 0 24 24" className="w-8 h-8 fill-none stroke-current stroke-[2.5] relative z-10" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M12 2L4 22L12 17L20 22L12 2Z" fill="currentColor" fillOpacity="0.2" />
+          <path d="M12 2L4 22M12 2L20 22" />
+          <path d="M7 16H17" />
+        </svg>
+        <div className="absolute inset-0 bg-white/10 opacity-0 group-hover:opacity-100 transition-opacity" />
       </div>
-      <div>
-        <h1 className="text-lg font-black text-slate-800 font-headline tracking-tighter leading-none">
-          ARCADIA<span className="text-primary italic">PP</span>
+      <div className="flex flex-col">
+        <h1 className={`text-2xl font-black font-headline tracking-tighter leading-none ${light ? 'text-white' : 'text-slate-900'}`}>
+          ArcadiAPP
         </h1>
-        <p className="text-[7px] font-black uppercase tracking-[0.2em] text-slate-400 mt-0.5">Enterprise Elite</p>
+        <p className={`text-[9px] font-black uppercase tracking-[0.25em] mt-1 ${light ? 'text-indigo-300' : 'text-indigo-600/60'}`}>
+          Indumentaria Premium
+        </p>
       </div>
     </div>
   );

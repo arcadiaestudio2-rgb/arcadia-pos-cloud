@@ -30,7 +30,7 @@ export function SaleTicket({ sale, items }: SaleTicketProps) {
         <p className="text-[10px] uppercase font-bold text-gray-600">Indumentaria & Calzado</p>
         <div className="border-b border-black border-dashed my-3" />
         <p className="font-bold text-sm">TICKET DE VENTA #{sale.id}</p>
-        <p className="text-[10px]">{formatDate(sale.timestamp)}</p>
+        <p className="text-[10px]">{formatDate(sale.created_at)}</p>
       </div>
 
       <div className="grid grid-cols-2 gap-x-2 gap-y-1 mb-4 text-[11px]">

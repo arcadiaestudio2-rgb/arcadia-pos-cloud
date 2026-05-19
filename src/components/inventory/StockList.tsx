@@ -2,24 +2,18 @@ import React, { useState, useMemo, useEffect } from 'react';
 import { 
   Package, 
   Search, 
-  Plus, 
   AlertTriangle,
-  History,
-  TrendingDown,
-  ArrowRight,
   ShieldAlert,
   Layers,
   DollarSign, 
   ChevronRight, 
-  ArrowUpDown,
   Download,
-  AlertCircle,
-  TrendingUp,
   CheckCircle2,
   Zap,
   Trash2,
   RotateCcw,
-  Upload
+  Upload,
+  TrendingUp
 } from 'lucide-react';
 import { toast } from '../common/CommonUI';
 import { motion, AnimatePresence } from 'motion/react';
@@ -30,18 +24,18 @@ import { getCategoryImage } from '../pos/ProductCard';
 interface StockListProps {
   products: InventoryItem[];
   loading: boolean;
-  updateStock: (variantId: number, quantity: number, type: 'INGRESO' | 'EGRESO', description: string, reason: string) => Promise<void>;
-  updateFinancialData: (variantId: number, data: { cost: number; margin: number; price_cash: number; price_debit: number; price_credit: number; description: string; reason: string }) => Promise<void>;
+  updateStock: (variantId: string, quantity: number, type: 'INGRESO' | 'EGRESO', description: string, reason: string) => Promise<void>;
+  updateFinancialData: (variantId: string, data: { cost: number; margin: number; priceCash: number; priceDebit: number; priceCredit: number; description: string; reason: string }) => Promise<void>;
   onFilteredChange?: (filtered: any[]) => void;
-  categories: string[];
-  brands: string[];
-  seasons: string[];
-  allColors: string[];
-  onAddAttribute: (type: 'categories' | 'brands' | 'seasons' | 'colors', name: string) => Promise<void>;
-  onUpdateProduct: (id: number, data: any) => Promise<void>;
-  onGetProductById: (id: number) => Promise<any>;
+  categories?: string[];
+  brands?: string[];
+  seasons?: string[];
+  allColors?: string[];
+  onAddAttribute?: (type: 'categories' | 'brands' | 'seasons' | 'colors', name: string) => Promise<void>;
+  onUpdateProduct: (id: string, data: any) => Promise<void>;
+  onGetProductById: (id: string) => Promise<any>;
   deletedProducts: InventoryItem[];
-  restoreProduct: (id: number) => Promise<void>;
+  restoreProduct: (id: string) => Promise<void>;
 }
 
 export function StockList({ 
@@ -54,7 +48,6 @@ export function StockList({
   brands,
   seasons,
   allColors,
-  onAddAttribute,
   onUpdateProduct,
   onGetProductById,
   deletedProducts,
@@ -73,10 +66,12 @@ export function StockList({
     };
   });
 
-  const handleDeleteProduct = async (id: number, name: string) => {
+  const handleDeleteProduct = async (id: string, name: string) => {
     if (!window.confirm(`¿Estás seguro de eliminar "${name}" y todas sus variantes del catálogo?`)) return;
     try {
       await onUpdateProduct(id, { status: 'deleted' });
+      // Trigger a full inventory refresh so the deleted product disappears immediately
+      window.dispatchEvent(new CustomEvent('refresh-stock'));
       toast.success('Producto eliminado del catálogo');
     } catch (error) {
       console.error(error);
@@ -101,16 +96,14 @@ export function StockList({
       // 1. Filter by Stock Status
       let matchesStock = true;
       if (stockState === 'normal') {
-        matchesStock = p.stock > p.stock_minimo;
+        matchesStock = p.stock > p.stockMinimo;
       } else if (stockState === 'low') {
-        matchesStock = p.stock > 0 && p.stock <= p.stock_minimo;
+        matchesStock = p.stock > 0 && p.stock <= p.stockMinimo;
       } else if (stockState === 'critical') {
         matchesStock = p.stock <= 0;
       }
       if (!matchesStock) return false;
 
-      // 2. Filter by Search input for real-time filtering
-      if (searchTerms.length === 0) return true;
       const searchableString = `${p.name} ${p.sku} ${p.brand} ${p.category} ${p.color} ${p.size}`.toLowerCase();
       return searchTerms.every(term => searchableString.includes(term));
     });
@@ -124,14 +117,17 @@ export function StockList({
 
 
   const groupedProducts = useMemo(() => {
-    const groups = new Map<number, any>();
+    const groups = new Map<string, any>();
     
     // 1. Initial grouping and totals
     filteredProducts.forEach(p => {
-      const pid = p.product_id || 0;
+      // Priority: productId (cloud) -> id (local fallback) -> placeholder
+      const pid = p.productId || p.id || '0';
       if (!groups.has(pid)) {
         groups.set(pid, {
           ...p,
+          id: pid, // Normalize id to the grouping key
+          productId: pid,
           totalStock: 0,
           variantCount: 0,
           variants: [],
@@ -151,19 +147,17 @@ export function StockList({
     
     // 2. Filter variants and refine data
     groups.forEach(group => {
-      const hasAnyStock = group.totalStock > 0;
-      
       group.variantCount = group.variants.length;
       
       // Calculate derived fields from (possibly filtered) variants
       group.variants.forEach((v: any) => {
-        const currentPvp = typeof v.price_cash === 'number' ? v.price_cash : 0;
+        const currentPvp = typeof v.priceCash === 'number' ? v.priceCash : 0;
         group.minPvp = Math.min(group.minPvp, currentPvp);
         group.maxPvp = Math.max(group.maxPvp, currentPvp);
         group.inventoryValue += (v.stock || 0) * currentPvp;
         
         if (v.stock === 0) group.hasCritical = true;
-        if (v.stock <= v.stock_minimo && v.stock > 0) group.hasLowStock = true;
+        if (v.stock <= (v.stockMinimo || 0) && v.stock > 0) group.hasLowStock = true;
       });
 
       // Special case for all out of stock
@@ -179,17 +173,17 @@ export function StockList({
       let mCredit = 0;
       
       try {
-        const info = typeof group.provider_info === 'string' 
-          ? JSON.parse(group.provider_info) 
-          : group.provider_info;
+        const info = typeof group.providerInfo === 'string' 
+          ? JSON.parse(group.providerInfo) 
+          : group.providerInfo;
         const manual = info?.manual_prices;
 
         // Hierarchy: Manual -> Base Price -> Calculated fallback (only if no manual at all)
-        mEfectivo = manual?.efectivo || group.base_price || group.maxPvp || 0;
+        mEfectivo = manual?.efectivo || group.basePrice || group.maxPvp || 0;
         
         // Use user's requested hierarchy for D and C fallbacks
-        mDebit = manual?.debito || manual?.efectivo || group.base_price || 0;
-        mCredit = manual?.credito || manual?.efectivo || group.base_price || 0;
+        mDebit = manual?.debito || manual?.efectivo || group.basePrice || 0;
+        mCredit = manual?.credito || manual?.efectivo || group.basePrice || 0;
 
         // If after manual/base check they are still 0 but we have fees, apply them 
         // ONLY if there was no manual price object at all (to avoid overwriting explicit 0s if they existed)
@@ -212,23 +206,23 @@ export function StockList({
   // Synchronize selectedProduct when the main products list changes (e.g. after a save)
   useEffect(() => {
     if (selectedProduct) {
-      const currentId = Number(selectedProduct.id);
+      const currentId = selectedProduct.id;
       // Use raw products prop to ensure we always have all variants in the drawer, 
       // ignoring the current filters/search of the list
-      const rawVariants = products.filter(p => p.product_id === currentId);
+      const rawVariants = products.filter(p => p.productId === currentId);
       
       if (rawVariants.length > 0) {
         const base = rawVariants[0];
         setSelectedProduct({
-          id: currentId.toString(),
+          id: currentId,
           name: base.name,
           brand: base.brand,
           category: base.category,
           variants: rawVariants,
           totalStock: rawVariants.reduce((sum, v) => sum + (v.stock || 0), 0),
           priceRange: { 
-            min: Math.min(...rawVariants.map(v => v.price_cash || 0)), 
-            max: Math.max(...rawVariants.map(v => v.price_cash || 0)) 
+            min: Math.min(...rawVariants.map(v => v.priceCash || 0)), 
+            max: Math.max(...rawVariants.map(v => v.priceCash || 0)) 
           }
         });
       }
@@ -314,9 +308,9 @@ export function StockList({
       p.stock,
       p.cost,
       p.margin,
-      p.price_cash,
-      p.price_debit || p.price_cash,
-      p.price_credit || p.price_cash
+      p.priceCash,
+      p.priceDebit || p.priceCash,
+      p.priceCredit || p.priceCash
     ]);
     
     const csvContent = [
@@ -394,9 +388,9 @@ export function StockList({
             await updateFinancialData(item.id, {
               cost: Number(cleanFields[8]) || item.cost,
               margin: Number(cleanFields[9]) || item.margin,
-              price_cash: Number(cleanFields[10]) || item.price_cash,
-              price_debit: Number(cleanFields[11]) || item.price_debit || 0,
-              price_credit: Number(cleanFields[12]) || item.price_credit || 0,
+              priceCash: Number(cleanFields[10]) || item.priceCash,
+              priceDebit: Number(cleanFields[11]) || item.priceDebit || 0,
+              priceCredit: Number(cleanFields[12]) || item.priceCredit || 0,
               description: 'Importación masiva por CSV',
               reason: 'INFLACION'
             });
@@ -566,7 +560,7 @@ export function StockList({
           <div className="relative z-10">
              <p className="text-[10px] font-black text-rose-600 uppercase tracking-widest mb-1">Alertas Stock</p>
              <h3 className="text-3xl font-black text-rose-600 italic">
-               {filteredProducts.filter(p => p.stock <= p.stock_minimo).length}
+               {filteredProducts.filter(p => p.stock <= (p.stockMinimo || 0)).length}
              </h3>
              <div className="mt-4 flex items-center gap-2 text-rose-600 font-bold text-[10px] uppercase">
                 <ShieldAlert size={12} />
@@ -617,9 +611,9 @@ export function StockList({
                       exit={{ opacity: 0, height: 0 }}
                       className="space-y-3 overflow-hidden"
                     >
-                      {section.products.map(product => (
+                      {section.products.map((product: any, pIdx: number) => (
                         <motion.div
-                          key={product.product_id}
+                          key={product.productId || product.id || pIdx}
                           layout
                           initial={{ opacity: 0, y: 20 }}
                           animate={{ opacity: 1, y: 0 }}
@@ -631,7 +625,7 @@ export function StockList({
                           onClick={() => {
                             setInitialTab('STOCK');
                             setSelectedProduct({
-                              id: product.product_id.toString(),
+                              id: product.productId,
                               name: product.name,
                               brand: product.brand,
                               category: product.category,
@@ -756,7 +750,7 @@ export function StockList({
                                   <button 
                                     onClick={(e) => {
                                       e.stopPropagation();
-                                      restoreProduct(product.product_id);
+                                      restoreProduct(product.productId);
                                     }}
                                     className="w-full px-6 h-14 rounded-2xl bg-emerald-50 text-emerald-600 flex items-center justify-center gap-2 hover:bg-emerald-500 hover:text-white transition-all shadow-sm font-black uppercase text-[10px] tracking-widest"
                                   >
@@ -767,7 +761,7 @@ export function StockList({
                                     <button 
                                       onClick={(e) => {
                                         e.stopPropagation();
-                                        handleDeleteProduct(product.product_id, product.name);
+                                        handleDeleteProduct(product.productId, product.name);
                                       }}
                                       className="w-14 h-14 rounded-2xl bg-rose-50 text-rose-400 flex items-center justify-center hover:bg-rose-500 hover:text-white hover:scale-105 active:scale-95 transition-all shadow-sm"
                                       title="Eliminar del catálogo"
@@ -780,7 +774,7 @@ export function StockList({
                                         e.stopPropagation();
                                         setInitialTab('FINANCIAL');
                                         setSelectedProduct({
-                                          id: product.product_id.toString(),
+                                          id: product.productId,
                                           name: product.name,
                                           brand: product.brand,
                                           category: product.category,
@@ -846,13 +840,11 @@ export function StockList({
         isOpen={!!selectedProduct}
         onClose={() => setSelectedProduct(null)}
         onSaveStock={updateStock}
-        onSaveFinancial={updateFinancialData}
         initialTab={initialTab}
         allColors={allColors}
         categories={categories}
         brands={brands}
         seasons={seasons}
-        onAddAttribute={onAddAttribute}
         onUpdateProduct={onUpdateProduct}
         onGetProductById={onGetProductById}
       />

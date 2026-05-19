@@ -1,24 +1,15 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { api } from '../../services/api';
 import { 
   X, 
-  Package, 
   TrendingUp, 
-  AlertTriangle, 
   Shirt,
   CheckCircle2, 
-  ArrowRight,
-  ChevronDown,
-  Info,
-  History,
   DollarSign,
   Plus,
   Minus,
-  ChevronRight,
   ArrowLeft,
-  LayoutGrid,
-  List,
   PackagePlus,
   RotateCcw,
   PlusCircle,
@@ -26,18 +17,16 @@ import {
   Trash2,
   ShieldAlert,
   MessageSquare,
-  Percent,
   Keyboard,
   Calendar,
   Tag,
-  CreditCard,
-  Banknote
+  AlertCircle
 } from 'lucide-react';
-import { getCategoryImage } from '../pos/ProductCard';
 import { InventoryItem } from '../../hooks/useInventory';
-import { toast, formatCurrency } from '../common/CommonUI';
-import { calculatePVP, calculateMargin, calculateDebitPrice, calculateCreditPrice } from '../../utils/pricing';
+import { Button, toast } from '../common/CommonUI';
+import { calculatePVP, calculateMargin } from '../../utils/pricing';
 import { useOperator } from '../../context/OperatorContext';
+import { isUUID } from '../../utils/validation';
 
 
 // Utility for smart size sorting
@@ -68,6 +57,7 @@ const compareSizes = (a: string, b: string) => {
 interface QuickViewDrawerProps {
   product: {
     id: string;
+    variant_id?: string;
     name: string;
     brand: string;
     category: string;
@@ -78,17 +68,20 @@ interface QuickViewDrawerProps {
   } | null;
   isOpen: boolean;
   onClose: () => void;
-  onSaveStock: (variantId: number, quantity: number, type: 'INGRESO' | 'EGRESO', description: string, reason: string) => Promise<void>;
-  onSaveFinancial: (variantId: number, data: { cost: number, margin: number, price_cash: number, price_debit: number, price_credit: number, description: string, reason: string }) => Promise<void>;
+  onSaveStock: (variantId: string, quantity: number, type: 'INGRESO' | 'EGRESO', description: string, reason: string) => Promise<void>;
+  onSaveFinancial?: (variantId: string, data: any) => Promise<void>;
   initialTab?: 'STOCK' | 'FINANCIAL';
-  allColors: string[];
-  categories: string[];
-  brands: string[];
-  seasons: string[];
-  onAddAttribute: (type: 'categories' | 'brands' | 'seasons' | 'colors', name: string) => Promise<void>;
-  onUpdateProduct: (id: number, data: any) => Promise<void>;
-  onGetProductById: (id: number) => Promise<any>;
+  allColors?: string[];
+  onFilteredChange?: (filtered: any[]) => void;
+  categories?: string[];
+  brands?: string[];
+  seasons?: string[];
+  onAddAttribute?: (type: 'categories' | 'brands' | 'seasons' | 'colors', name: string) => Promise<void>;
+  onUpdateProduct: (id: string, data: any) => Promise<void>;
+  onGetProductById: (id: string) => Promise<any>;
   providers?: string[];
+  deletedProducts?: InventoryItem[];
+  restoreProduct?: (id: string) => Promise<void>;
 }
 
 const STOCK_REASONS_POSITIVE = [
@@ -115,13 +108,11 @@ export function QuickViewDrawer({
   isOpen, 
   onClose, 
   onSaveStock, 
-  onSaveFinancial, 
   initialTab,
-  onAddAttribute,
   onUpdateProduct,
   onGetProductById,
-  brands,
-  categories
+  brands = [],
+  categories = []
 }: QuickViewDrawerProps) {
   const [activeTab, setActiveTab] = useState<'STOCK' | 'FINANCIAL' | 'PRODUCT'>(initialTab || 'STOCK');
   const [view, setView] = useState<'MATRIX' | 'ADJUST'>('MATRIX');
@@ -143,9 +134,9 @@ export function QuickViewDrawer({
   // Financial Adjustment State
   const [cost, setCost] = useState(0);
   const [margin, setMargin] = useState(0);
-  const [price_cash, setPriceCash] = useState(0);
-  const [price_debit, setPriceDebit] = useState(0);
-  const [price_credit, setPriceCredit] = useState(0);
+  const [priceCash, setPriceCash] = useState(0);
+  const [priceDebit, setPriceDebit] = useState(0);
+  const [priceCredit, setPriceCredit] = useState(0);
   const [isUpdating, setIsUpdating] = useState(false);
   const [financialReason, setFinancialReason] = useState('');
   const [financialDescription, setFinancialDescription] = useState('');
@@ -169,13 +160,22 @@ export function QuickViewDrawer({
 
   // Initial tab sync
   useEffect(() => {
-      // Initialize edit fields
-      setEditName(product?.name || '');
-      setEditBrand(product?.brand || '');
-      setEditCategory(product?.category || '');
+      if (!isOpen || !product) return;
+
+      const productId = product.id;
       
-      const productId = Number(product?.id);
-      if (!productId || isNaN(productId)) return;
+      // FIX: Strict guard for productId
+      if (!productId || productId === 'undefined' || productId === 'null' || productId === '0') {
+          console.error("[QuickViewDrawer] CRITICAL: Missing or invalid productId", { product });
+          toast.error("Error: El producto no tiene un ID válido.");
+          onClose(); // Auto-close if invalid
+          return;
+      }
+
+      // Initialize edit fields
+      setEditName(product.name || '');
+      setEditBrand(product.brand || '');
+      setEditCategory(product.category || '');
       
       onGetProductById(productId).then(full => {
         if (full) {
@@ -186,6 +186,9 @@ export function QuickViewDrawer({
           setEditBrand(full.brand || '');
           setEditCategory(full.category || '');
         }
+      }).catch(err => {
+        console.error("[QuickViewDrawer] Error fetching product:", productId, err);
+        toast.error("No se pudo cargar el detalle del producto");
       });
   }, [isOpen, initialTab, product?.id]);
 
@@ -193,9 +196,11 @@ export function QuickViewDrawer({
   useEffect(() => {
     if (selectedVariant) {
       if (view === 'ADJUST') {
+        setPriceCash(selectedVariant.priceCash || 0);
+        setPriceDebit(selectedVariant.priceDebit || 0);
+        setPriceCredit(selectedVariant.priceCredit || 0);
         setCost(selectedVariant.cost || 0);
         setMargin(selectedVariant.margin || 0);
-        setPriceCash(selectedVariant.price_cash || 0);
         setAdjustmentValue(0);
         setSelectedReason('');
         setDescription('');
@@ -203,7 +208,7 @@ export function QuickViewDrawer({
         setFinancialDescription('');
 
         // Try to load manual prices from provider_info or calculate fallback
-        let manualEfectivo = selectedVariant.price_cash || 0;
+        let manualEfectivo = selectedVariant.priceCash || 0;
         let manualDebit = 0;
         let manualCredit = 0;
         
@@ -228,7 +233,7 @@ export function QuickViewDrawer({
         }
 
         setPriceCash(manualEfectivo);
-        // STRICT HIERARCHY: manual -> price_cash -> 0
+        // STRICT HIERARCHY: manual -> priceCash -> 0
         setPriceDebit(manualDebit || manualEfectivo || 0);
         setPriceCredit(manualCredit || manualEfectivo || 0);
       }
@@ -239,10 +244,10 @@ export function QuickViewDrawer({
     let mDebit = 0;
     let mCredit = 0;
     
-    // Use price_cash if available (from REST), fallback to base_price (from Supabase)
-    let mEfectivo = localProduct?.price_cash || localProduct?.base_price || 0;
+    // Use priceCash if available (from REST), fallback to base_price (from Supabase)
+    let mEfectivo = localProduct?.priceCash || localProduct?.base_price || 0;
     if (!mEfectivo && localProduct?.variants?.length > 0) {
-      mEfectivo = Math.max(...localProduct.variants.map((v: any) => v.price_cash || v.pvp || 0));
+      mEfectivo = Math.max(...localProduct.variants.map((v: any) => v.priceCash || v.pvp || 0));
     }
     
     try {
@@ -298,8 +303,8 @@ export function QuickViewDrawer({
     }
   }, [cost, margin, activeTab, view]);
 
-  const [sessionColors, setSessionColors] = useState<string[]>([]);
-  const [sessionSizes, setSessionSizes] = useState<string[]>([]);
+  const [sessionColors] = useState<string[]>([]);
+  const [sessionSizes] = useState<string[]>([]);
 
   // Matrix Calculations
   const matrixData = useMemo(() => {
@@ -324,16 +329,14 @@ export function QuickViewDrawer({
     return { colors, sizes, grid };
   }, [localProduct, sessionColors, sessionSizes]);
 
-  const [isAddingColor, setIsAddingColor] = useState(false);
-  const [isAddingSize, setIsAddingSize] = useState(false);
-  const [newAttrValue, setNewAttrValue] = useState('');
+  // State for adding new attributes (not currently used in drawer)
 
   const handleAddVariant = async (color: string, size: string) => {
     if (!product) return;
     setIsSaving(true);
     try {
       // Fetch full product details to ensure we have all fields for the update RPC
-      const fullProduct = await onGetProductById(Number(product.id));
+      const fullProduct = await onGetProductById(product.id);
       if (!fullProduct) throw new Error("No se pudo obtener la información del producto");
 
       // 0. Check if variant already exists (might be hidden because of 0 stock)
@@ -361,10 +364,10 @@ export function QuickViewDrawer({
         size: v.size,
         color: v.color,
         stock: v.stock,
-        stock_minimo: v.stock_minimo,
+        stockMinimo: v.stockMinimo,
         cost: v.cost,
         margin: v.margin,
-        price_cash: v.price_cash,
+        priceCash: v.priceCash,
         isCustom: v.is_custom
       }));
 
@@ -375,10 +378,10 @@ export function QuickViewDrawer({
         size,
         color,
         stock: 0,
-        stock_minimo: fullProduct.total_stock_minimo || 5,
+        stockMinimo: fullProduct.stockMinimo || 5,
         cost: fullProduct.cost || 0,
         margin: fullProduct.base_margin || 60,
-        price_cash: newPvp,
+        priceCash: newPvp,
         isCustom: false
       };
 
@@ -388,21 +391,21 @@ export function QuickViewDrawer({
         brand: fullProduct.brand,
         season: fullProduct.season || '',
         barcode: fullProduct.barcode,
-        iva_rate: fullProduct.iva_rate || 21,
+        ivaRate: fullProduct.ivaRate || 21,
         cost: fullProduct.cost || 0,
-        base_margin: fullProduct.base_margin || 60,
-        total_stock_minimo: fullProduct.total_stock_minimo || 5,
-        provider_info: fullProduct.provider_info || '',
+        baseMargin: fullProduct.baseMargin || 60,
+        stockMinimo: fullProduct.stockMinimo || 5,
+        providerInfo: fullProduct.providerInfo || '',
         status: fullProduct.status || 'active',
-        base_price: fullProduct.base_price || 0,
-        last_operator: operatorName || 'Sistema',
+        basePrice: fullProduct.basePrice || 0,
+        lastOperator: operatorName || 'Sistema',
         variants: [...currentVariants, newVariant]
       };
 
-      await onUpdateProduct(Number(product.id), payload);
+      await onUpdateProduct(String(product.id), payload);
       
       // Refresh local product data immediately
-      const updated = await onGetProductById(Number(product.id));
+      const updated = await onGetProductById(String(product.id));
       if (updated) {
         setLocalProduct(updated);
       }
@@ -423,11 +426,10 @@ export function QuickViewDrawer({
     setIsSaving(true);
     try {
       const type = adjustmentValue > 0 ? 'INGRESO' : 'EGRESO';
-      const finalReason = description ? `${selectedReason}: ${description}` : selectedReason;
       await onSaveStock(selectedVariant.id, adjustmentValue, type, description, selectedReason);
       
       // Refresh local product data
-      const updated = await onGetProductById(Number(product.id));
+      const updated = await onGetProductById(product.id);
       if (updated) setLocalProduct({
         ...product,
         variants: updated.variants
@@ -444,70 +446,38 @@ export function QuickViewDrawer({
 
   const handleFinancialAction = async () => {
     const targetVariant = isEditingGeneral ? localProduct?.variants?.[0] : selectedVariant;
-    if (!targetVariant || !financialReason) return;
+    if (!targetVariant && !localProduct) return;
     
-    // Validations (requested by user)
-    if (price_cash <= 0 || price_debit <= 0 || price_credit <= 0) {
-      toast.error('Los precios deben ser números positivos');
-      return;
-    }
+    const productId = localProduct?.id || localProduct?.variant_id || (targetVariant as any)?.productId;
+    const financialUpdateReason = financialReason || 'INFLACION';
 
-    setIsUpdating(true);
     try {
-      // 1. Fetch fresh full product data from API to avoid "data starvation"
-      const freshProduct = await api.getProductById(Number(localProduct.id));
-      if (!freshProduct) {
-        throw new Error('No se pudo recuperar la información completa del producto');
+      if (!isUUID(productId)) throw new Error('Product ID inválido');
+      if (!Number.isFinite(Number(priceCash)) || Number(priceCash) <= 0) {
+        throw new Error('Precio de Efectivo inválido');
       }
-
-      // 2. Ensure we have variants before proceeding
-      const currentVariants = Array.isArray(freshProduct.variants) ? freshProduct.variants : [];
-      if (currentVariants.length === 0) {
-        throw new Error('El producto no tiene variantes cargadas. No se puede actualizar el precio sin stock.');
-      }
-
-      // 3. Build variants payload using FRESH data merged with NEW financial values
-      const variantsPayload = currentVariants.map((v: any) => ({
-        ...v,
+      
+      setIsUpdating(true);
+      const updatedProduct = await api.unifiedProductUpdate(productId!, {
+        basePrice: Number(priceCash),
         cost: Number(cost),
-        margin: Number(margin),
-        pvp: Number(price_cash)
-      }));
-
-      // 4. Update the combined inventory item
-      const updatedProduct = await api.updateInventoryItem(localProduct.id, {
-        ...freshProduct, // Use fresh full data as base
-        price_cash: Number(price_cash),
-        price_debit: Number(price_debit),
-        price_credit: Number(price_credit),
-        cost: Number(cost),
-        margin: Number(margin),
-        last_operator: operatorName || 'Sistema',
-        variants: variantsPayload
+        baseMargin: Number(margin),
+        providerInfo: {
+          manual_prices: {
+            efectivo: Number(priceCash),
+            debito: Number(priceDebit),
+            credito: Number(priceCredit)
+          }
+        },
+        updateReason: financialUpdateReason,
+        operatorId: '0'
       });
 
-      // Update local state and feedback (requested by user)
       setLocalProduct(updatedProduct);
-      toast.success('Inventario actualizado correctamente');
-      
+      toast.success('Precios actualizados');
       setIsEditingGeneral(false);
       setView('MATRIX');
       setSelectedVariant(null);
-      setFinancialDescription('');
-
-      // Optionally notify parent component if it supports it
-      // if (props.onUpdateSuccess) props.onUpdateSuccess(updatedProduct);
-
-    } catch (error: any) {
-      console.error("[Update Error]:", error);
-      // Detailed error handling (requested by user)
-      if (error.message.includes('401')) {
-        toast.error('Sesión expirada. Redirigiendo...');
-      } else if (error.message.includes('404')) {
-        toast.error('Producto no encontrado en el servidor');
-      } else {
-        toast.error(error.message || 'Error interno al guardar cambios');
-      }
     } finally {
       setIsUpdating(false);
     }
@@ -522,7 +492,7 @@ export function QuickViewDrawer({
     if (!localProduct) return;
     setIsSaving(true);
     try {
-      await onUpdateProduct(Number(localProduct.id), {
+      await onUpdateProduct(String(localProduct.id), {
         name: editName,
         brand: editBrand,
         category: editCategory,
@@ -557,6 +527,14 @@ export function QuickViewDrawer({
             transition={{ type: 'spring', damping: 30, stiffness: 220 }}
             className="relative w-full max-w-[520px] bg-white h-full shadow-[-20px_0_60px_rgba(0,0,0,0.1)] flex flex-col overflow-hidden rounded-l-[32px]"
           >
+            {(!localProduct?.id || localProduct.id === 'undefined') && (
+              <div className="absolute inset-0 z-[1000] bg-white/95 backdrop-blur-md flex flex-col items-center justify-center p-12 text-center">
+                 <AlertCircle size={64} className="text-error mb-6" />
+                 <h2 className="text-2xl font-black text-slate-800 mb-4 uppercase">Error de Identidad</h2>
+                 <p className="text-slate-500 font-bold mb-8">Este producto no posee un UUID válido. No es posible realizar ajustes hasta que se complete la sincronización del catálogo.</p>
+                 <Button onClick={onClose} className="bg-slate-900 text-white px-12 h-14 rounded-2xl">Entendido</Button>
+              </div>
+            )}
             {/* Premium Header (Image 4) */}
             <div className="p-8 pt-12 pb-6 flex items-start justify-between relative shrink-0">
               <div className="flex items-center gap-5">
@@ -838,21 +816,21 @@ export function QuickViewDrawer({
                              <label className="text-[10px] font-black text-slate-500 uppercase tracking-[0.2em] block mb-3 px-1">Efectivo (PVP)</label>
                              <div className="flex items-baseline gap-2">
                                <span className="text-xl font-black text-slate-600">$</span>
-                               <input type="number" className="bg-transparent text-4xl font-black text-white outline-none w-full placeholder:text-slate-800" placeholder="0" value={price_cash || ''} onChange={(e) => { const newVal = Number(e.target.value); setPriceCash(newVal); setMargin(calculateMargin(cost, newVal, (localProduct as any)?.iva_rate || 21)); }} />
+                               <input type="number" className="bg-transparent text-4xl font-black text-white outline-none w-full placeholder:text-slate-800" placeholder="0" value={priceCash || ''} onChange={(e) => { const newVal = Number(e.target.value); setPriceCash(newVal); setMargin(calculateMargin(cost, newVal, (localProduct as any)?.ivaRate || 21)); }} />
                              </div>
                            </div>
                            <div className="bg-white rounded-[2rem] p-6 border-2 border-slate-100 shadow-sm">
                              <label className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] block mb-3 px-1">Débito</label>
                              <div className="flex items-baseline gap-2">
                                <span className="text-xl font-black text-slate-300">$</span>
-                               <input type="number" className="bg-transparent text-3xl font-black text-slate-800 outline-none w-full placeholder:text-slate-200" placeholder="0" value={price_debit || ''} onChange={(e) => setPriceDebit(Number(e.target.value))} />
+                               <input type="number" className="bg-transparent text-3xl font-black text-slate-800 outline-none w-full placeholder:text-slate-200" placeholder="0" value={priceDebit || ''} onChange={(e) => setPriceDebit(Number(e.target.value))} />
                              </div>
                            </div>
                            <div className="bg-white rounded-[2rem] p-6 border-2 border-slate-100 shadow-sm">
                              <label className="text-[10px] font-black text-slate-400 uppercase tracking-[0.2em] block mb-3 px-1">Crédito</label>
                              <div className="flex items-baseline gap-2">
                                <span className="text-xl font-black text-slate-300">$</span>
-                               <input type="number" className="bg-transparent text-3xl font-black text-slate-800 outline-none w-full placeholder:text-slate-200" placeholder="0" value={price_credit || ''} onChange={(e) => setPriceCredit(Number(e.target.value))} />
+                               <input type="number" className="bg-transparent text-3xl font-black text-slate-800 outline-none w-full placeholder:text-slate-200" placeholder="0" value={priceCredit || ''} onChange={(e) => setPriceCredit(Number(e.target.value))} />
                              </div>
                            </div>
                          </div>
@@ -895,16 +873,16 @@ export function QuickViewDrawer({
                             <div className="relative z-10 space-y-4">
                                <div>
                                  <p className="text-[10px] font-black text-white/40 uppercase tracking-widest mb-1">Efectivo</p>
-                                 <p className="text-5xl lg:text-6xl font-black italic tracking-tighter">${price_cash.toLocaleString()}</p>
+                                 <p className="text-5xl lg:text-6xl font-black italic tracking-tighter">${priceCash.toLocaleString()}</p>
                                </div>
                                <div className="flex justify-center gap-10 pt-6 border-t border-white/10">
                                  <div>
                                    <p className="text-[9px] font-black text-white/40 uppercase tracking-widest mb-1">Débito</p>
-                                   <p className="text-2xl font-black italic tracking-tighter">${price_debit.toLocaleString()}</p>
+                                   <p className="text-2xl font-black italic tracking-tighter">${priceDebit.toLocaleString()}</p>
                                  </div>
                                  <div>
                                    <p className="text-[9px] font-black text-white/40 uppercase tracking-widest mb-1">Crédito</p>
-                                   <p className="text-2xl font-black italic tracking-tighter">${price_credit.toLocaleString()}</p>
+                                   <p className="text-2xl font-black italic tracking-tighter">${priceCredit.toLocaleString()}</p>
                                  </div>
                                </div>
                             </div>
@@ -915,15 +893,15 @@ export function QuickViewDrawer({
                         </div>
 
                         <button 
-                          disabled={isSaving || !financialReason}
+                          disabled={isSaving || isUpdating || !financialReason}
                           onClick={handleFinancialAction}
                           className={`w-full py-5 rounded-2xl text-white font-black uppercase tracking-[0.2em] text-xs flex items-center justify-center gap-3 transition-all active:scale-95 disabled:opacity-50 shadow-xl ${
-                            (margin >= (selectedVariant?.margin || 0) && price_cash >= (selectedVariant?.price_cash || 0))
+                            (margin >= (selectedVariant?.margin || 0) && priceCash >= (selectedVariant?.priceCash || 0))
                               ? 'bg-tertiary shadow-tertiary/20'
                               : 'bg-error shadow-error/20'
                           }`}
                         >
-                          {isSaving ? <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" /> : 'Confirmar Precios Generales'}
+                          {isSaving || isUpdating ? <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" /> : 'Confirmar Precios Generales'}
                         </button>
                       </div>
                     )}

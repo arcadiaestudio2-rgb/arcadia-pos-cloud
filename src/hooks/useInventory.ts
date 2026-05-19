@@ -1,44 +1,49 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback } from 'react';
+import { UUID } from '../types/uuid';
 import { api } from '../services/api';
 import { toast } from '../components/common/CommonUI';
 import { useOperator } from '../context/OperatorContext';
 
 export interface InventoryItem {
-  id: number;
-  product_id: number;
+  id: UUID;
+  productId?: UUID;
   name: string;
   sku: string;
   color: string;
   size: string;
   stock: number;
-  stock_minimo: number;
+  stockMinimo: number;
   cost: number;
   margin: number;
-  price_cash: number;
+  priceCash: number;
+  priceDebit: number;
+  priceCredit: number;
   category: string;
   brand: string;
   season: string;
   isCustom?: boolean;
-  price_debit?: number;
-  price_credit?: number;
+  providerInfo?: any;
+  basePrice?: number;
+  baseMargin?: number;
+  baseCost?: number;
 }
 
 export interface InventoryMovement {
-  id: number;
-  variant_id: number | null;
+  id: string; 
+  variant_id: string | null;
   quantity: number;
   type: string;
   description: string;
   reason: string;
   created_at: string;
   operator: string;
-  timestamp?: string;
+  
   change_amount?: number;
   sku?: string;
   product_name?: string;
-  base_product_name?: string; // flat: product name without variant suffix
-  size?: string | null;       // flat: talle
-  color?: string | null;      // flat: color
+  base_product_name?: string;
+  size?: string | null;
+  color?: string | null;
   event_id?: string;
   inventory_items?: {
     sku: string;
@@ -51,7 +56,7 @@ export interface InventoryMovement {
 }
 
 export interface ProductAttribute {
-  id?: string | number;
+  id?: string;
   name: string;
 }
 
@@ -62,11 +67,6 @@ export function useInventory() {
     : rawOperator;
 
   const [products, setProducts] = useState<InventoryItem[]>([]);
-  const [categories, setCategories] = useState<ProductAttribute[]>([]);
-  const [brands, setBrands] = useState<ProductAttribute[]>([]);
-  const [seasons, setSeasons] = useState<ProductAttribute[]>([]);
-  const [colors, setColors] = useState<ProductAttribute[]>([]);
-  
   const [deletedProducts, setDeletedProducts] = useState<InventoryItem[]>([]);
   const [movements, setMovements] = useState<InventoryMovement[]>([]);
   const [loading, setLoading] = useState(true);
@@ -74,38 +74,55 @@ export function useInventory() {
   const [hasMore, setHasMore] = useState(true);
   const [offset, setOffset] = useState(0);
   const [loadingMore, setLoadingMore] = useState(false);
+  const [attributes, setAttributes] = useState<{ categories: string[], brands: string[], seasons: string[], colors: string[] }>({
+    categories: [],
+    brands: [],
+    seasons: [],
+    colors: []
+  });
   const PAGE_SIZE = 50;
 
-  const loadAttributes = useCallback(async () => {
-    try {
-      const attrs = await api.getCatalogAttributes();
-      if (attrs && typeof attrs === 'object') {
-        setCategories(Array.isArray(attrs.categories) ? attrs.categories.map((name: string) => ({ name })) : []);
-        setBrands(Array.isArray(attrs.brands) ? attrs.brands.map((name: string) => ({ name })) : []);
-        setSeasons(Array.isArray(attrs.seasons) ? attrs.seasons.map((name: string) => ({ name })) : []);
-        setColors(Array.isArray(attrs.colors) ? attrs.colors.map((name: string) => ({ name })) : []);
-      }
-    } catch (err: any) {
-      console.error('Error loading attributes:', err);
-    }
-  }, []);
 
   const refresh = useCallback(async () => {
     setLoading(true);
     setOffset(0);
     setHasMore(true);
     try {
-      const [itemsData, deletedData, movementsData] = await Promise.all([
+      const [itemsData, deletedData, movementsData, attrs] = await Promise.all([
         api.getInventoryItems(),
         api.getDeletedInventoryItems(),
         api.getInventoryHistory(PAGE_SIZE, 0),
-        loadAttributes()
+        api.getCatalogAttributes()
       ]);
+
+      if (attrs) {
+        setAttributes({
+          categories: attrs.categories || [],
+          brands: attrs.brands || [],
+          seasons: attrs.seasons || [],
+          colors: attrs.colors || []
+        });
+      }
       
-      setProducts(Array.isArray(itemsData) ? itemsData : []);
-      setDeletedProducts(Array.isArray(deletedData) ? deletedData : []);
+      const mapItem = (v: any) => ({
+        ...v,
+        id: v.id,
+        productId: v.productId || v.product_id,
+        priceCash: v.priceCash || v.price_cash || 0,
+        priceDebit: v.priceDebit || v.price_debit || 0,
+        priceCredit: v.priceCredit || v.price_credit || 0,
+        stockMinimo: v.stockMinimo || v.stock_minimo || 0,
+        name: v.name || v.products?.name || 'Producto'
+      });
+
+      setProducts((itemsData || []).map(mapItem));
+      setDeletedProducts(Array.isArray(deletedData) ? deletedData.map(mapItem) : []);
       // Ensure movementsData is typed correctly
-      setMovements(Array.isArray(movementsData) ? (movementsData as InventoryMovement[]) : []);
+      setMovements(Array.isArray(movementsData) ? movementsData.map((m: any) => ({
+        ...m,
+        id: m.id,
+        variant_id: m.variant_id || m.variant_uuid
+      })) : []);
       if (movementsData.length < PAGE_SIZE) setHasMore(false);
       setError(null);
     } catch (err: any) {
@@ -118,18 +135,8 @@ export function useInventory() {
     } finally {
       setLoading(false);
     }
-  }, [loadAttributes]);
+  }, []);
 
-  const addAttribute = async (type: 'categories' | 'brands' | 'seasons' | 'colors', name: string) => {
-    try {
-      await api.addCatalogAttribute(type, name);
-      await loadAttributes();
-      toast.success(`${name} agregado a ${type}`);
-    } catch (err) {
-      console.error(`Error adding ${type}:`, err);
-      toast.error(`Error al agregar ${name}`);
-    }
-  };
 
   const loadMoreMovements = useCallback(async () => {
     if (!hasMore || loading || loadingMore) return;
@@ -148,32 +155,49 @@ export function useInventory() {
     }
   }, [hasMore, loading, loadingMore, offset]);
 
+
+  // 1. Fetch initial data
   useEffect(() => {
     refresh();
-    
-    // Escuchar evento operativo de stock
-    const handleStockRefresh = () => {
-      console.log("[Inventory] Refrescando dominio de STOCK");
-      refresh();
-    };
+  }, [refresh]);
 
-    window.addEventListener('refresh-stock', handleStockRefresh);
+  // 2. Local events listeners
+  useEffect(() => {
+    window.addEventListener('refresh-stock', refresh);
+    window.addEventListener('refresh-attributes', refresh);
     return () => {
-      window.removeEventListener('refresh-stock', handleStockRefresh);
+      window.removeEventListener('refresh-stock', refresh);
+      window.removeEventListener('refresh-attributes', refresh);
     };
   }, [refresh]);
 
-  const updateStock = async (variantId: number, quantity: number, type: 'INGRESO' | 'EGRESO', description: string, reason: string) => {
+  // --- REALTIME IDEMPOTENT SYNC ---
+  useEffect(() => {
+    const handleSync = () => {
+      console.log("🔄 [REALTIME] Refreshing inventory from sync event");
+      refresh();
+    };
+
+    window.addEventListener('arcadia:inventory:sync', handleSync);
+
+    return () => {
+      window.removeEventListener('arcadia:inventory:sync', handleSync);
+    };
+  }, [refresh]);
+
+  const updateStock = async (variantId: UUID, quantity: number, type: 'INGRESO' | 'EGRESO', description: string, reason: string) => {
     if (!operator) {
       toast.error('Debe seleccionar un operador para realizar esta acción');
       throw new Error('Operador no seleccionado');
     }
     try {
-      const operatorName = operator?.name || 'Sistema';
-      const userId = Number(operator?.id || 1);
-      const finalDescription = description ? `${description} (Op: ${operatorName})` : `Ajuste manual (Op: ${operatorName})`;
-      const variant = products.find(p => p.id === variantId);
-      await api.updateStock(variantId, quantity, type, finalDescription, reason, userId, variant?.sku);
+      if (!operator?.id) throw new Error("ID de operador no válido");
+      const userId = operator.id.toString();
+      
+      const finalReason = description ? `${reason}: ${description}` : reason;
+      
+      // Llamar a la API con el nuevo contrato de 5 parámetros
+      await api.updateStock(variantId, quantity, type, finalReason, userId);
       
       // Optimistic update
       setProducts(prev => prev.map(p => {
@@ -184,8 +208,9 @@ export function useInventory() {
         return p;
       }));
 
-      // Background refresh
+      // Background refresh and notify other components
       refresh().catch(() => {});
+      window.dispatchEvent(new CustomEvent('refresh-stock'));
       toast.success('Stock actualizado correctamente');
     } catch (err: any) {
       toast.error(err.message || 'Error al actualizar stock');
@@ -193,19 +218,19 @@ export function useInventory() {
     }
   };
 
-  const bulkUpdateStock = async (updates: { variantId: number, quantity: number, type: 'INGRESO' | 'EGRESO', reason: string }[]) => {
+  const bulkUpdateStock = async (updates: { variantId: string, quantity: number, type: 'INGRESO' | 'EGRESO', reason: string }[]) => {
     if (!operator) {
       toast.error('Debe seleccionar un operador para realizar esta acción');
       throw new Error('Operador no seleccionado');
     }
     setLoading(true);
     try {
-      const operatorName = operator?.name || 'Sistema';
-      const userId = Number(operator?.id || 1);
+      if (!operator?.id) throw new Error("ID de operador no válido");
+      const userId = operator.id.toString();
       // Since api doesn't have a single bulk update endpoint for general movements,
       // we execute them in parallel. 
       await Promise.all(updates.map(u => 
-        api.updateStock(u.variantId, u.quantity, u.type, `${u.reason} (Op: ${operatorName})`, 'Inventory Update', userId)
+        api.updateStock(u.variantId, u.quantity, u.type, u.reason, userId)
       ));
       await refresh();
       toast.success('Actualización masiva completada');
@@ -218,14 +243,13 @@ export function useInventory() {
     }
   };
 
-  const updateProduct = async (id: number, data: any) => {
+  const updateProduct = async (id: string, data: any) => {
     try {
       await api.updateProduct(id, data);
       
       // If status changed to deleted, record it in history for all variants
       if (data.status === 'deleted') {
-        const product = products.find(p => p.product_id === id);
-        const variants = products.filter(p => p.product_id === id);
+        const variants = products.filter(p => p.productId === id);
         
         // Record restoration in history for all variants in parallel to avoid blocking the UI
         await Promise.all(variants.map(variant => 
@@ -233,10 +257,8 @@ export function useInventory() {
             variant.id,
             -(variant.stock || 0),
             'EGRESO',
-            `Producto eliminado del catálogo: ${product?.name || 'ID: ' + id}`,
             `Baja: Eliminado del catálogo (Op: ${operator?.name || 'Sistema'})`,
-            Number(operator?.id) || 0,
-            variant.sku
+            operator?.id?.toString() || 'system'
           ).catch(e => console.warn(`[Inventory] Failed to record deletion movement for variant ${variant.id}:`, e))
         ));
       }
@@ -244,6 +266,17 @@ export function useInventory() {
       await refresh();
     } catch (err: any) {
       toast.error(err.message || 'Error al actualizar producto');
+      throw err;
+    }
+  };
+
+  const deleteProduct = async (id: string) => {
+    try {
+      await api.deleteProduct(id);
+      toast.success('Producto eliminado del catálogo');
+      await refresh();
+    } catch (err: any) {
+      toast.error(err.message || 'Error al eliminar producto');
       throw err;
     }
   };
@@ -283,82 +316,76 @@ export function useInventory() {
     }
   };
 
-  const updateFinancialData = async (variantId: number, data: { cost: number, margin: number, price_cash: number, price_debit: number, price_credit: number, description: string, reason: string }) => {
+  const updateFinancialData = async (variantId: UUID, data: { cost: number, margin: number, priceCash: number, priceDebit: number, priceCredit: number, description: string, reason: string }) => {
     if (!operator) {
       toast.error('Debe seleccionar un operador para realizar esta acción');
       throw new Error('Operador no seleccionado');
     }
     setLoading(true);
     try {
-      const item = products.find(p => p.id === variantId);
+      const item = products.find(p => String(p.id) === String(variantId));
       if (!item) throw new Error('Producto no encontrado');
 
-      const operatorName = operator?.name || 'Sistema';
-      const userId = Number(operator?.id || 1);
-      const finalDescription = data.description ? `${data.description} (Op: ${operatorName})` : `Ajuste manual de precios (Op: ${operatorName})`;
-
+      if (!operator?.id) throw new Error("ID de operador no válido");
       // 1. Update base cost/margin on the products table (lightweight — no full RPC needed)
       let currentInfo = {};
       try {
-        const rawInfo = (item as any).provider_info;
+        const rawInfo = (item as any).providerInfo;
         currentInfo = typeof rawInfo === 'string' ? JSON.parse(rawInfo) : (rawInfo || {});
       } catch (e) {
         console.error("Error parsing provider_info:", e);
       }
 
-      const updatePromise = api.updateProduct(item.product_id, {
+      // 1. Actualizar solo campos financieros del producto base
+      if (!item.productId) {
+        throw new Error("ID de producto base no encontrado. Esta variante podría estar huérfana o ser legacy.");
+      }
+
+      const updatePromise = api.updateProduct(item.productId, {
         cost: data.cost,
-        base_margin: data.margin,
-        base_price: data.price_cash,
-        price_cash: data.price_cash,
-        price_debit: data.price_debit,
-        price_credit: data.price_credit,
-        provider_info: JSON.stringify({
+        baseMargin: data.margin,
+        priceCash: data.priceCash,
+        providerInfo: JSON.stringify({
           ...currentInfo,
           manual_prices: {
-            efectivo: data.price_cash,
-            debito: data.price_debit,
-            credito: data.price_credit
+            efectivo: data.priceCash,
+            debito: data.priceDebit,
+            credito: data.priceCredit
           }
-        }),
-        variants: [{
-          id: variantId,
-          cost: data.cost,
-          margin: data.margin,
-          pvp: data.price_cash,
-          sku: item.sku // Ensure variant is identified correctly
-        }]
+        })
       });
 
-      // 2. Record Movement (Audit Log)
-      const structuredReason = `EFECTIVO: ${data.price_cash} | DEBITO: ${data.price_debit} | CREDITO: ${data.price_credit} | COSTO: ${data.cost} | MOTIVO: ${data.reason} (Op: ${operatorName})`;
-      const logPromise = api.recordMovement({
-        variantId,
-        userId,
-        amount: 0,
-        reason: structuredReason,
-        eventId: `FIN-${Date.now()}`
+      // 2. Actualizar la variante específica (pvp, cost, margin)
+      const variantUpdatePromise = api.updateVariant(variantId, {
+        cost: data.cost,
+        margin: data.margin,
+        priceCash: data.priceCash,
+        priceDebit: data.priceDebit,
+        priceCredit: data.priceCredit
       });
 
-      await Promise.all([updatePromise, logPromise]);
+      // 3. Los logs se generan automáticamente en la DB vía adjust_stock
+      // Si solo es un cambio de precio, no llamamos a adjust_stock.
+      
+      await Promise.all([updatePromise, variantUpdatePromise]);
       
       // Optimistic Update: Update local state immediately for a smooth UX
       setProducts(prev => prev.map(p => {
-        if (p.id === variantId) {
+        if (String(p.id) === String(variantId)) {
           return {
             ...p,
             cost: data.cost,
             margin: data.margin,
-            price_cash: data.price_cash,
-            price_debit: data.price_debit,
-            price_credit: data.price_credit,
-            // Also update the nested provider_info for components that read it directly
-            provider_info: JSON.stringify({
+            priceCash: data.priceCash,
+            priceDebit: data.priceDebit,
+            priceCredit: data.priceCredit,
+            // Also update the nested providerInfo for components that read it directly
+            providerInfo: JSON.stringify({
               ...currentInfo,
               manual_prices: {
-                efectivo: data.price_cash,
-                debito: data.price_debit,
-                credito: data.price_credit
+                efectivo: data.priceCash,
+                debito: data.priceDebit,
+                credito: data.priceCredit
               }
             })
           };
@@ -368,6 +395,7 @@ export function useInventory() {
 
       // Background refresh to keep everything in sync
       refresh().catch(() => {});
+      window.dispatchEvent(new CustomEvent('refresh-stock'));
       toast.success('Datos financieros actualizados y auditados');
     } catch (err: any) {
       console.error('Error updating financial data:', err);
@@ -391,18 +419,19 @@ export function useInventory() {
     updateStock,
     bulkUpdateStock,
     updateProduct,
+    deleteProduct,
     massAdjustPrices,
     updateMarginMassive,
     updateFinancialData,
     // List of products marked as deleted
     deletedProducts,
-    restoreProduct: async (id: number) => {
+    attributes,
+    restoreProduct: async (id: string) => {
       try {
         await api.updateProduct(id, { status: 'active' });
         
         // Record restoration in history for all variants
-        const product = deletedProducts.find(p => p.product_id === id);
-        const variants = deletedProducts.filter(p => p.product_id === id);
+        const variants = deletedProducts.filter(p => p.productId === id);
         
         // Record restoration in history for all variants in parallel
         await Promise.all(variants.map(variant => 
@@ -410,10 +439,8 @@ export function useInventory() {
             variant.id,
             0,
             'INGRESO',
-            `Producto restaurado al catálogo: ${product?.name || 'ID: ' + id}`,
             `Alta: Restaurado al catálogo (Op: ${operator?.name || 'Sistema'})`,
-            Number(operator?.id) || 0,
-            variant.sku
+            operator?.id?.toString() || 'system'
           ).catch(e => console.warn(`[Inventory] Failed to record restoration movement for variant ${variant.id}:`, e))
         ));
         
@@ -423,11 +450,6 @@ export function useInventory() {
         toast.error(err.message || 'Error al restaurar producto');
       }
     },
-    categories,
-    brands,
-    seasons,
-    colors,
-    addAttribute,
     annulSession: async (session: { evento_id?: string | null; movements: any[] }) => {
       if (!operator) {
         toast.error('Debe seleccionar un operador para realizar esta acción');
@@ -436,15 +458,14 @@ export function useInventory() {
       setLoading(true);
       try {
         const operatorName = operator?.name || 'Sistema';
-        const userId = Number(operator?.id || 1);
-        const result = await api.annulMovementsBatch(
+        await api.annulMovementsBatch(
           session.movements,
           operatorName,
-          userId,
+          operator.id.toString(),
           session.evento_id ?? null
         );
         await refresh();
-        toast.success(`Operación anulada — ${result.reversed} movimiento(s) revertido(s)`);
+        toast.success(`Operación anulada`);
         return true;
       } catch (err: any) {
         toast.error(err.message || 'Error al anular la operación');

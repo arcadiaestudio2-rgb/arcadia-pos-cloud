@@ -3,18 +3,20 @@ import { motion } from 'motion/react';
 import { useAuth } from '../../context/AuthContext';
 import { Button, toast, BrandBlock } from '../common/CommonUI';
 import { Lock, Mail, Loader2, ArrowRight } from 'lucide-react';
+import { InstallButton } from '../common/InstallButton';
 
 export function Login() {
   const { login } = useAuth();
   const [name, setName] = useState('');
   const [password, setPassword] = useState('');
+  const [rememberMe, setRememberMe] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsLoading(true);
     try {
-      await login(name, password);
+      await login(name, password, rememberMe);
       toast.success('¡Bienvenido de nuevo!');
     } catch (error: any) {
       toast.error(error.message || 'Error al iniciar sesión');
@@ -34,13 +36,21 @@ export function Login() {
         animate={{ opacity: 1, y: 0 }}
         className="w-full max-w-md z-10"
       >
+        <div className="mb-6 flex justify-center">
+          <InstallButton forceShow={true} />
+        </div>
+
         <div className="bg-white/[0.03] backdrop-blur-2xl border border-white/10 p-10 rounded-[3rem] shadow-2xl relative overflow-hidden">
           {/* Subtle line decoration */}
           <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-primary via-tertiary to-primary opacity-50" />
           
-          <div className="flex flex-col items-center mb-10">
-            <BrandBlock className="mb-2 invert brightness-0" />
-            <h2 className="text-white/40 text-[10px] font-black uppercase tracking-[0.3em]">Acceso Administrativo</h2>
+          <div className="flex flex-col items-center mb-12">
+            <div className="relative mb-6">
+              <div className="absolute inset-0 bg-indigo-500 blur-3xl opacity-20" />
+              <BrandBlock className="relative scale-125" light={true} />
+            </div>
+            <div className="h-px w-12 bg-gradient-to-r from-transparent via-white/20 to-transparent mb-4" />
+            <h2 className="text-white/60 text-[10px] font-black uppercase tracking-[0.4em]">Gestión de Indumentaria</h2>
           </div>
 
           <form onSubmit={handleSubmit} className="space-y-6">
@@ -52,7 +62,7 @@ export function Login() {
                   type="text" 
                   value={name}
                   onChange={(e) => setName(e.target.value)}
-                  placeholder="Gabi Administrator"
+                  placeholder="Usuario o Email"
                   className="w-full h-16 bg-white/[0.05] border border-white/10 rounded-2xl pl-14 pr-6 text-white text-sm font-bold focus:ring-4 focus:ring-primary/10 focus:border-primary/30 outline-none transition-all placeholder:text-white/10"
                   required
                 />
@@ -74,6 +84,26 @@ export function Login() {
               </div>
             </div>
 
+            <div className="flex items-center px-4">
+              <label className="flex items-center gap-3 cursor-pointer group">
+                <div className="relative flex items-center">
+                  <input 
+                    type="checkbox" 
+                    checked={rememberMe}
+                    onChange={(e) => setRememberMe(e.target.checked)}
+                    className="sr-only peer"
+                  />
+                  <div className="w-5 h-5 border-2 border-white/10 rounded-lg bg-white/5 transition-all peer-checked:bg-primary peer-checked:border-primary group-hover:border-white/20" />
+                  <div className="absolute inset-0 flex items-center justify-center opacity-0 peer-checked:opacity-100 transition-opacity">
+                    <svg className="w-3.5 h-3.5 text-white fill-current" viewBox="0 0 20 20">
+                      <path d="M0 11l2-2 5 5L18 3l2 2L7 18z" />
+                    </svg>
+                  </div>
+                </div>
+                <span className="text-[10px] font-black uppercase tracking-widest text-white/40 group-hover:text-white/60 transition-colors">Recordar sesión</span>
+              </label>
+            </div>
+
             <Button 
               type="submit" 
               className="w-full h-16 mt-4 group" 
@@ -88,38 +118,6 @@ export function Login() {
               )}
             </Button>
           </form>
-
-          {/* Quick Access Info (Helpful for dev/demo) */}
-          <div className="mt-10 pt-8 border-t border-white/5">
-            <p className="text-[9px] font-black text-white/20 uppercase tracking-[0.2em] text-center mb-6">Credenciales de Acceso Rápido</p>
-            <div className="flex justify-center gap-3">
-              {[
-                { label: 'Admin', name: 'Gabi Administrator', pass: 'admin123', color: 'from-primary/20 to-primary/5' },
-                { label: 'Stock', name: 'Stock Manager', pass: 'stock123', color: 'from-tertiary/20 to-tertiary/5' },
-                { label: 'Ventas', name: 'Vendedor', pass: 'vendedor123', color: 'from-slate-400/20 to-slate-400/5' }
-              ].map(role => (
-                <button 
-                  key={role.label}
-                  type="button"
-                  onClick={() => {
-                    setName(role.name);
-                    setPassword(role.pass);
-                    // Auto-submit after a tiny delay to show the change
-                    setTimeout(() => {
-                      const form = document.querySelector('form');
-                      if (form) form.requestSubmit();
-                    }, 100);
-                  }}
-                  className={`flex-1 group/btn relative py-3 rounded-2xl bg-gradient-to-br ${role.color} border border-white/5 transition-all hover:scale-105 hover:border-white/10 active:scale-95 overflow-hidden`}
-                >
-                  <div className="relative z-10 flex flex-col items-center">
-                    <span className="text-[10px] font-black text-white/60 uppercase tracking-widest group-hover/btn:text-white transition-colors">{role.label}</span>
-                  </div>
-                  <div className="absolute inset-0 bg-white/0 group-hover/btn:bg-white/5 transition-colors" />
-                </button>
-              ))}
-            </div>
-          </div>
         </div>
 
         <p className="mt-8 text-center text-white/20 text-[10px] font-medium tracking-widest uppercase">

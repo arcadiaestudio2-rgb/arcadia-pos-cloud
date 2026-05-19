@@ -31,3 +31,9 @@ Thumbs.db
 
 # Supabase local config
 .supabase/
+
+# Local databases and caches
+arcadia.db
+.firebase/
+dev-dist/
+scratch/

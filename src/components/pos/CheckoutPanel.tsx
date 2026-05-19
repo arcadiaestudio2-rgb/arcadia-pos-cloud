@@ -10,33 +10,14 @@ import {
   Pause, 
   Settings2,
   Clock,
-  ChevronRight,
   Split,
   X,
   Check
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
-import { formatCurrency, toast } from '../common/CommonUI';
-import { getCategoryImage } from './ProductCard';
+import { formatCurrency } from '../common/CommonUI';
 
-interface CartItem {
-  id: string;
-  variantId: number;
-  name: string;
-  price: number;
-  quantity: number;
-  image?: string;
-  category?: string;
-  sku?: string;
-  size?: string;
-  color?: string;
-  stock: number;
-  prices: {
-    cash: number;
-    debit: number;
-    credit: number;
-  };
-}
+import { CartItem } from '../../types/cart';
 
 interface PaymentEntry {
   id: string;
@@ -68,8 +49,8 @@ interface CheckoutPanelProps {
   selectedCustomer: any;
   setSelectedCustomer: (c: any) => void;
   fees: PaymentFees;
-  onUpdateQty: (variantId: number, delta: number) => void;
-  onRemove: (variantId: number) => void;
+  onUpdateQty: (variant_id: string, delta: number) => void;
+  onRemove: (variant_id: string) => void;
   onClearCart: () => void;
   onFinishSale: () => void;
   onSavePending: () => void;
@@ -113,24 +94,26 @@ export const CheckoutPanel: React.FC<CheckoutPanelProps> = ({
     
     let weightedTotal = 0;
     cart.forEach(item => {
-      let itemPrice = item.prices.cash;
+      // Defensive check
+      const prices = item.prices || { cash: item.price_at_sale || 0, debit: item.price_at_sale || 0, credit: item.price_at_sale || 0 };
+      let itemPrice = prices.cash;
       
       if (type === 'cash') {
-        itemPrice = item.prices.cash * (1 - fees.cashDiscount / 100);
+        itemPrice = prices.cash * (1 - fees.cashDiscount / 100);
       } else if (type === 'qr') {
-        itemPrice = item.prices.cash * (1 + fees.qrSurcharge / 100);
+        itemPrice = prices.cash * (1 + fees.qrSurcharge / 100);
       } else if (type === 'debit') {
-        itemPrice = item.prices.debit || item.prices.cash;
+        itemPrice = prices.debit || prices.cash;
       } else if (type === 'credit') {
         // Para 1 cuota usamos el precio de crédito manual, para más cuotas aplicamos el recargo global
         if (installments === 1) {
-          itemPrice = item.prices.credit || item.prices.cash;
+          itemPrice = prices.credit || prices.cash;
         } else {
-          itemPrice = item.prices.cash * (1 + (fees.creditSurcharges[installments] || 0) / 100);
+          itemPrice = prices.cash * (1 + (fees.creditSurcharges[installments] || 0) / 100);
         }
       }
 
-      weightedTotal += itemPrice * item.quantity;
+      weightedTotal += itemPrice * (item.quantity || 1);
     });
 
     return weightedTotal * ratio;
@@ -442,8 +425,8 @@ export const CheckoutPanel: React.FC<CheckoutPanelProps> = ({
           
           {isSplit ? (
             <div className="space-y-2">
-              {payments.map((_, idx) => (
-                <React.Fragment key={idx}>
+              {payments.map((payment, idx) => (
+                <React.Fragment key={payment.id || idx}>
                   {renderPaymentBlock(idx, idx === 1)}
                 </React.Fragment>
               ))}
@@ -720,7 +703,7 @@ export const CheckoutPanel: React.FC<CheckoutPanelProps> = ({
                 ) : (
                   <div className="divide-y divide-slate-50">
                     {cart.map((item) => (
-                      <div key={item.variantId} className="p-4 flex gap-4 hover:bg-slate-50 transition-colors group">
+                      <div key={item.variant_id} className="p-4 flex gap-4 hover:bg-slate-50 transition-colors group">
                         <div className="w-16 h-16 bg-slate-100 rounded-2xl flex-shrink-0 flex items-center justify-center text-slate-400">
                           {item.image ? <img src={item.image} alt="" className="w-full h-full object-cover rounded-2xl" /> : <PlusCircle size={24} />}
                         </div>
@@ -731,7 +714,7 @@ export const CheckoutPanel: React.FC<CheckoutPanelProps> = ({
                               <p className="text-[10px] font-bold text-slate-400 font-mono">{item.sku} • {item.size}/{item.color}</p>
                             </div>
                             <button 
-                              onClick={() => onRemove(item.variantId)}
+                              onClick={() => onRemove(item.variant_id)}
                               className="p-1.5 text-slate-300 hover:text-rose-500 hover:bg-rose-50 rounded-lg transition-all"
                             >
                               <Trash2 size={16} />
@@ -740,14 +723,14 @@ export const CheckoutPanel: React.FC<CheckoutPanelProps> = ({
                           <div className="flex justify-between items-center mt-3">
                             <div className="flex items-center gap-3 bg-white border border-slate-100 rounded-xl p-1 shadow-sm">
                               <button 
-                                onClick={() => onUpdateQty(item.variantId, -1)}
+                                onClick={() => onUpdateQty(item.variant_id, -1)}
                                 className="w-7 h-7 flex items-center justify-center text-slate-400 hover:bg-slate-50 hover:text-primary rounded-lg transition-all"
                               >
                                 <Minus size={14} />
                               </button>
                               <span className="text-[13px] font-black text-slate-800 min-w-[20px] text-center">{item.quantity}</span>
                               <button 
-                                onClick={() => onUpdateQty(item.variantId, 1)}
+                                onClick={() => onUpdateQty(item.variant_id, 1)}
                                 className="w-7 h-7 flex items-center justify-center text-slate-400 hover:bg-slate-50 hover:text-primary rounded-lg transition-all"
                               >
                                 <Plus size={14} />
@@ -756,7 +739,7 @@ export const CheckoutPanel: React.FC<CheckoutPanelProps> = ({
                             <div className="text-right">
                               <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-0.5">Subtotal</p>
                               <p className="text-[14px] font-black text-indigo-600 font-mono leading-none">
-                                {formatCurrency(item.prices[paymentMethod] * item.quantity)}
+                                {formatCurrency(item.price_at_sale * item.quantity)}
                               </p>
                             </div>
                           </div>

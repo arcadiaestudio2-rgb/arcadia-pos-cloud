@@ -1,72 +1,225 @@
 import { supabase } from '../lib/supabase';
 import { getLocalISODate } from '../utils/format';
+import { LocalRepository } from '../db/repository';
+import { db } from '../db/database';
+import { validateSyncPayload, isUUID } from '../utils/validation';
+import { UUID } from '../types/uuid';
+import { mappers } from '../utils/mappers';
 
-const PRODUCT_SELECT = 'id, name, category, brand, season, barcode, iva_rate, base_price, cost, base_margin, provider_info';
-const VARIANT_SELECT = 'id, product_id, sku, size, color, stock, stock_minimo, cost, margin, pvp, is_custom';
+const PRODUCT_SELECT = 'id, name, category, brand, season, barcode, iva_rate, base_price, cost, base_margin, provider_info, status';
+const VARIANT_SELECT = 'id, product_id, sku, size, color, stock, stock_minimo, cost, margin, pvp, debit_price, credit_price, is_custom';
 
-const isLocalServerDown = true; 
-
-// Helper para obtener el store_id del usuario actual desde localStorage
-const getCurrentStoreId = () => {
-  const savedUser = localStorage.getItem('arcadia_user');
-  if (savedUser) {
-    try {
-      const user = JSON.parse(savedUser);
-      const sid = user.store_id;
-      // Validar que no sea nulo, vacío o el placeholder de ceros
-      if (!sid || sid === '00000000-0000-0000-0000-000000000000') return null;
-      return sid;
-    } catch (e) {
-      return null;
-    }
-  }
-  return null;
+/**
+ * REGLA DE ORO: El StoreID es SIEMPRE el UID del usuario autenticado en Supabase.
+ */
+export const getCurrentStoreId = async (): Promise<string | null> => {
+  const { data: { user } } = await supabase.auth.getUser();
+  return user?.id || null;
 };
 
 export const api = {
-  supabase: supabase,
-  // --- REST API METHODS ---
-  async updateInventoryItem(id: number | string, data: any) {
-    // LIMPIEZA PARA MULTI-CUENTA: Descartamos campos de identidad
-    const { 
-      barcode, 
-      store_id, 
-      id: _id, 
-      created_at, 
-      variants, 
-      ...fieldsToUpdate 
-    } = data;
+  supabase,
+  getCurrentStoreId,
+  generateId: () => crypto.randomUUID() as `${string}-${string}-${string}-${string}-${string}`,
 
-    const { data: cloudData, error } = await supabase
-      .from('products')
-      .update(fieldsToUpdate)
-      .eq('id', id)
-      .select();
-
-    if (error) {
-      console.error("❌ Error actualizando Supabase:", error.message);
-      throw error;
-    }
-
-    return cloudData?.[0] || data;
+  // HELPER: Limpiar objetos para evitar errores de columnas inexistentes o undefined
+  _removeUndefined: (obj: Record<string, any>) => {
+    return Object.fromEntries(
+      Object.entries(obj).filter(([_, value]) => value !== undefined)
+    );
   },
 
-  // Helper to map manual prices from provider_info
+  login: async (email: string, pass: string) => {
+    try {
+      const { data, error } = await supabase.auth.signInWithPassword({
+        email: email.trim(),
+        password: pass,
+      });
+
+      if (error) throw error;
+
+      if (data && data.user) {
+        // Al loguearse, el store_id es su propio ID de usuario
+        return {
+          id: data.user.id,
+          name: data.user.email?.split('@')[0] || 'Usuario',
+          email: data.user.email || '',
+          role: 'admin',
+          store_id: data.user.id
+        };
+      }
+      throw new Error("No se pudo obtener la información del usuario.");
+    } catch (e: any) {
+      console.error("🚨 Error de Login:", e.message);
+      throw new Error(e.message || "Error de conexión con Supabase");
+    }
+  },
+
+  // --- REST API METHODS ---
+  // --- UNIFIED UPDATE SERVICE (Source of Truth) ---
+  unifiedProductUpdate: async (id: UUID, data: any) => {
+    if (!isUUID(id)) throw new Error("Invalid Product UUID");
+    const storeId = await getCurrentStoreId();
+    if (!storeId) throw new Error("No autenticado");
+
+    // 0. Obtener estado ANTERIOR para el historial de precios
+    const { data: oldProd } = await supabase
+      .from('products')
+      .select('*, variants(id, cost, margin, pvp, sku)')
+      .eq('id', id)
+      .eq('store_id', storeId)
+      .single();
+
+    // 1. Sanitizar payload principal
+    const payload = mappers.mapProductToDB({ ...data, storeId });
+    
+    // 2. Sincronizar provider_info (Precios Maestros)
+    let info = payload.provider_info || {};
+    if (typeof info === 'string') {
+      try { info = JSON.parse(info); } catch (e) { info = {}; }
+    }
+    
+    // Asegurar que manual_prices esté actualizado
+    payload.provider_info = {
+      ...info,
+      manual_prices: {
+        efectivo: Number(payload.base_price) || info.manual_prices?.efectivo || 0,
+        debito: Number(data.priceDebit || info.manual_prices?.debito || 0),
+        credito: Number(data.priceCredit || info.manual_prices?.credito || 0)
+      }
+    };
+
+    // 3. Actualizar Producto en DB
+    const { data: updatedProduct, error: pError } = await supabase
+      .from('products')
+      .update(payload)
+      .eq('id', id)
+      .eq('store_id', storeId)
+      .select()
+      .single();
+
+    if (pError) throw pError;
+
+    // 4. Sincronizar Variantes (Precios por SKU)
+    const variantsToUpdate = data.variants || [];
+    
+    if (variantsToUpdate.length > 0) {
+      // Split new vs existing variants
+      const newVariants = variantsToUpdate.filter((v: any) => 
+        !v.id || String(v.id).startsWith("new-")
+      );
+      const existingVariants = variantsToUpdate.filter((v: any) => 
+        v.id && !String(v.id).startsWith("new-")
+      );
+
+      // Sanitize and Insert NEW Variants
+      if (newVariants.length > 0) {
+        const cleanNew = newVariants.map((v: any) => {
+          const dbVariant = mappers.mapVariantToDB({ ...v, storeId });
+          // Ensure id and product_id are REMOVED from the payload object itself
+          // BUT for INSERT we MUST include product_id to maintain relational integrity
+          return { ...dbVariant, product_id: id };
+        });
+
+        const { error: insertError } = await supabase
+          .from('variants')
+          .insert(cleanNew);
+
+        if (insertError) throw insertError;
+      }
+
+      // Sanitize and Update EXISTING Variants
+      if (existingVariants.length > 0) {
+        for (const v of existingVariants) {
+          const dbVariant = mappers.mapVariantToDB({ ...v, storeId });
+          const variantId = dbVariant.id;
+          
+          // REMOVE product_id and id from the update payload
+          const { id: _, product_id: __, ...updatePayload } = dbVariant;
+
+          const { error: updateError } = await supabase
+            .from('variants')
+            .update(updatePayload)
+            .eq('id', variantId)
+            .eq('store_id', storeId);
+
+          if (updateError) throw updateError;
+        }
+      }
+    } else {
+      await supabase
+        .from('variants')
+        .update({ 
+           pvp: Number(payload.base_price),
+           cost: Number(payload.cost),
+           margin: Number(payload.base_margin)
+        })
+        .eq('product_id', id)
+        .eq('store_id', storeId);
+    }
+
+    // 5. Historial de precios (opcional, para auditoría)
+    if (oldProd) {
+      const oldPrices = api._mapPrices(oldProd);
+      const newPrices = {
+        priceCash: payload.base_price,
+        priceDebit: payload.provider_info.manual_prices.debito,
+        priceCredit: payload.provider_info.manual_prices.credito
+      };
+
+      const hasChanges = oldPrices.priceCash !== newPrices.priceCash || 
+                         oldPrices.priceDebit !== newPrices.priceDebit || 
+                         oldPrices.priceCredit !== newPrices.priceCredit;
+
+      if (hasChanges) {
+        console.log('[Price Sync] Detected price change for product:', id);
+      }
+    }
+    // 6. Update Local Mirror (Dexie) to ensure UI reflects changes immediately
+    try {
+      // Re-fetch everything from Supabase for this product to get the ground truth
+      const { data: freshProd } = await supabase
+        .from('products')
+        .select(`*, variants(*)`)
+        .eq('id', id)
+        .single();
+        
+      if (freshProd) {
+        const { variants: freshVariants, ...prodFields } = freshProd;
+        await LocalRepository.upsertProducts([prodFields]);
+        if (freshVariants && freshVariants.length > 0) {
+          await LocalRepository.upsertVariants(freshVariants);
+        }
+      }
+    } catch (mirrorError) {
+      console.warn("⚠️ [unifiedProductUpdate] Failed to update local mirror:", mirrorError);
+    }
+
+    // 7. Trigger UI Refresh
+    window.dispatchEvent(new CustomEvent('refresh-stock'));
+    return updatedProduct;
+  },
+
+  updateInventoryItem: async (id: string, data: any) => {
+    return api.unifiedProductUpdate(id, {
+      ...data,
+      updateReason: data.reason || 'Actualización de Inventario'
+    });
+  },
+
   _mapPrices: (v: any) => {
     let mDebit = 0;
     let mCredit = 0;
     let mEfectivo = v.pvp || v.base_price || 0;
-    
+
     try {
-      // Robust detection of provider_info across different joining strategies
       const rawInfo = v.products?.provider_info || v.provider_info || (v as any).product?.provider_info;
-      
+
       if (rawInfo && String(rawInfo) !== "[object Object]") {
         try {
           const info = typeof rawInfo === 'string' ? JSON.parse(rawInfo) : rawInfo;
-          // Robust check for corruption (spreading a string results in indexed keys)
           const isCorrupt = info && typeof info === 'object' && Object.keys(info).length > 0 && Object.keys(info).every(k => !isNaN(Number(k)));
-          
+
           if (info && typeof info === 'object' && !Array.isArray(info) && !isCorrupt) {
             if (info.manual_prices) {
               mDebit = Number(info.manual_prices.debito || info.manual_prices.debit) || 0;
@@ -82,688 +235,706 @@ export const api = {
       console.warn("Error mapping prices:", e);
     }
 
-    // Ensure we return valid numbers
     return {
-      price_cash: Number(mEfectivo) || 0,
-      price_debit: Number(mDebit) || 0,
-      price_credit: Number(mCredit) || 0
+      priceCash: Number(mEfectivo) || 0,
+      priceDebit: Number(mDebit) || 0,
+      priceCredit: Number(mCredit) || 0
     };
-  },
-
-
-  login: async (email: string, pass: string) => {
-    if (!email || !pass) throw new Error("Email y contraseña son obligatorios.");
-    
-    let targetEmail = email.trim();
-    
-    // Mapeo de nombres de demo a sus emails reales en Supabase
-    const demoMapping: Record<string, string> = {
-      'Gabi Administrator': 'admin@arcadia.com',
-      'Stock Manager': 'stock@arcadia.com',
-      'Vendedor': 'vendedor@arcadia.com'
-    };
-
-    if (demoMapping[targetEmail]) {
-      targetEmail = demoMapping[targetEmail];
-      console.log(`🔄 Mapeando "${email}" -> "${targetEmail}"`);
-    }
-
-    console.log("🔐 Llamando a Supabase Auth para:", targetEmail);
-    try {
-      const { data, error } = await supabase.auth.signInWithPassword({
-        email: targetEmail,
-        password: pass,
-      });
-
-      if (!error && data.user) {
-        console.log("✅ [Supabase] Login exitoso para:", targetEmail);
-        
-        // Carga segura del perfil del usuario logueado
-        const { data: profile, error: profileErr } = await supabase
-          .from('profiles')
-          .select('id, name, role, email, store_id')
-          .eq('id', data.user.id)
-          .maybeSingle();
-        
-        if (profile) return profile;
-        
-        if (profileErr) console.error("Error cargando perfil:", profileErr.message);
-
-        return {
-          id: data.user.id,
-          name: data.user.email ?? 'Usuario',
-          email: data.user.email ?? '',
-          role: 'seller',
-          store_id: null
-        };
-      }
-    } catch (e) {
-      console.warn("⚠️ [Supabase] Falló intento de login real, probando bypass...");
-    }
-
-    // BYPASS DE SEGURIDAD PARA DEMO/VERIFICACIÓN (Solo si el real falló o no existe el usuario)
-    const lowerEmail = targetEmail.toLowerCase();
-    const isDemoEmail = lowerEmail === 'admin@arcadia.com' || lowerEmail === 'admin@arcadia.app' ||
-                        lowerEmail === 'stock@arcadia.com' || lowerEmail === 'stock@arcadia.app' ||
-                        lowerEmail === 'vendedor@arcadia.com' || lowerEmail === 'vendedor@arcadia.app';
-
-    const isDemoPass = pass === 'admin123' || pass === 'stock123' || pass === 'vendedor123';
-
-    if (isDemoEmail && isDemoPass) {
-      console.warn("🔓 [DEBUG] Bypass de auth activado para usuario:", targetEmail);
-      const demoUserKey = lowerEmail.split('@')[0];
-      const mockProfiles: Record<string, any> = {
-        'admin': { id: '3c92c3b1-35bd-4008-b234-9d8a847239fa', name: 'Gabi Administrator', email: 'admin@arcadia.com', role: 'admin' },
-        'stock': { id: '73a40975-3fcd-42d7-ad4b-513ed6e6e711', name: 'Stock Manager', email: 'stock@arcadia.com', role: 'stock-manager' },
-        'vendedor': { id: '12236d56-2e3c-49fb-8c62-12c36ddcf0ba', name: 'Vendedor', email: 'vendedor@arcadia.com', role: 'seller' }
-      };
-      return mockProfiles[demoUserKey];
-    }
-    
-    throw new Error("Credenciales inválidas en Supabase y sin bypass disponible.");
-  },
-
-  loginTest: async () => {
-    console.log("🚀 Iniciando prueba de conexión...");
-    const { data, error } = await supabase.auth.signInWithPassword({
-      email: 'test@example.com', 
-      password: 'password123',
-    });
-
-    if (error) {
-      console.error("❌ Prueba fallida:", error.message);
-      return false;
-    }
-    console.log("✅ Conexión exitosa. El problema es el input del formulario o el usuario específico.");
-    return data;
   },
 
   fetchStats: async () => {
-    const today = getLocalISODate();
-
-    const [salesResult, variantsResult, debtorsResult, productsCountResult] = await Promise.all([
-      supabase.from('sales').select('total, discount').gte('timestamp', today),
-      supabase.from('variants').select('stock, stock_minimo, sku, pvp, cost, product_id'),
-      supabase.from('clients').select('name, debt_balance').gt('debt_balance', 0).order('debt_balance', { ascending: false }).limit(5),
-      supabase.from('products').select('id, name, status', { count: 'exact' }).neq('status', 'deleted')
-    ]);
-    
-    const revenue = salesResult.data?.reduce((acc, s) => acc + (s.total || 0), 0) || 0;
-    
-    // Build a set of active product IDs from the products query
-    const activeProducts = new Map(
-      (productsCountResult.data || []).map((p: any) => [p.id, p.name])
-    );
-
-    // Filter variants to only those belonging to active (non-deleted) products
-    const activeVariants = (variantsResult.data || []).filter(
-      (v: any) => activeProducts.has(v.product_id)
-    );
-
-    const criticalStock = activeVariants
-      .filter((v: any) => v.stock <= v.stock_minimo && v.stock_minimo > 0)
-      .map((v: any) => ({
-        sku: v.sku,
-        name: activeProducts.get(v.product_id) || 'Sin nombre',
-        stock: v.stock,
-        min: v.stock_minimo
-      }))
-      .slice(0, 5);
-
-    // Calcular Cuentas por Cobrar real
-    const ar = (debtorsResult.data || []).reduce((acc, c) => acc + (c.debt_balance || 0), 0);
-
-    const topSeller = { 
-      name: revenue > 0 ? 'Varios Artículos' : 'Sin Ventas', 
-      sales: salesResult.data?.length || 0, 
-      revenue: revenue 
-    };
-
-    return {
-      revenue,
-      cost: revenue * 0.7,
-      ar,
-      topSeller,
-      productsCount: productsCountResult.count || 0,
-      activeUsers: 3,
-      criticalStock: Array.isArray(activeVariants) ? activeVariants
-        .filter((v: any) => v.stock <= v.stock_minimo && v.stock_minimo > 0)
-        .map((v: any) => ({
-          sku: v.sku,
-          name: activeProducts.get(v.product_id) || 'Sin nombre',
-          stock: v.stock,
-          min: v.stock_minimo
-        }))
-        .slice(0, 5) : [],
-      agingDebtors: Array.isArray(debtorsResult.data) ? (debtorsResult.data || []).map((c: any) => ({ 
-        name: c.name, 
-        debt: c.debt_balance, 
-        days: Math.floor(Math.random() * 90)
-      })) : [],
-      deadStock: Array.isArray(activeVariants) ? activeVariants
-        .filter((v: any) => v.stock > 100)
-        .slice(0, 3)
-        .map((v: any) => ({
-          id: v.sku,
-          name: activeProducts.get(v.product_id) || 'Stock Inactivo',
-          stock: v.stock,
-          loss: v.stock * (v.cost || 0) * 0.1,
-          last_sale_date: '2024-01-01'
-        })) : []
-    };
-  },
-
-  getCatalogAttributes: async () => {
-    // 2. Fallback to Supabase
     try {
-      const storeId = getCurrentStoreId();
-      if (!storeId) {
-        console.warn("ℹ️ [Cloud Auth] Esperando store_id válido para atributos.");
-        return [];
-      }
+      const storeId = await getCurrentStoreId();
+      if (!storeId) return { revenue: 0, cost: 0, ar: 0, topSeller: { name: '-', sales: 0, revenue: 0 }, productsCount: 0, criticalStock: [], agingDebtors: [], deadStock: [] };
 
-      let query = supabase.from('catalog_attributes').select('type, value').eq('store_id', storeId);
-      const { data, error } = await query;
-      if (error) {
-        if (error.code === 'PGRST301' || (error as any).status === 401) {
-          console.warn("[Cloud Auth] Unauthorized to fetch attributes. Using local/empty fallback.");
-          return {};
-        }
-        throw error;
-      }
-      
-      return (data || []).reduce((acc: any, curr: any) => {
-        const type = curr.type;
-        if (!acc[type]) acc[type] = [];
-        acc[type].push(curr.value);
-        return acc;
-      }, {});
+      const today = getLocalISODate();
+
+      const [salesResult, variantsResult, productsResult, debtorsResult] = await Promise.all([
+        supabase.from('sales').select('total').eq('store_id', storeId).gte('created_at', `${today}T00:00:00`),
+        supabase.from('variants').select('stock, stock_minimo, cost, product_id, sku').eq('store_id', storeId),
+        supabase.from('products').select('id, name').eq('store_id', storeId).neq('status', 'deleted'),
+        supabase.from('clients').select('name, debt_balance').eq('store_id', storeId).gt('debt_balance', 0).order('debt_balance', { ascending: false }).limit(5)
+      ]);
+
+      const revenue = salesResult.data?.reduce((acc, s) => acc + (s.total || 0), 0) || 0;
+      const productsMap = new Map((productsResult.data || []).map(p => [p.id, p.name]));
+
+      const criticalStock = (variantsResult.data || [])
+        .filter(v => v.stock <= v.stock_minimo && v.stock_minimo > 0)
+        .map(v => {
+          if (!v.product_id) return null;
+          return {
+            sku: v.sku,
+            name: productsMap.get(v.product_id) || 'Producto',
+            stock: v.stock,
+            min: v.stock_minimo
+          };
+        })
+        .filter((v): v is any => v !== null)
+        .slice(0, 5);
+
+      return {
+        revenue,
+        cost: (variantsResult.data || []).reduce((acc, v) => acc + (v.stock * (v.cost || 0)), 0),
+        ar: debtorsResult.data?.reduce((acc, c) => acc + (c.debt_balance || 0), 0) || 0,
+        topSeller: { name: revenue > 0 ? 'Varios' : 'Sin ventas', sales: salesResult.data?.length || 0, revenue },
+        productsCount: productsResult.data?.length || 0,
+        criticalStock,
+        agingDebtors: (debtorsResult.data || []).map(c => ({ name: c.name, debt: c.debt_balance, days: 0 })),
+        deadStock: []
+      };
     } catch (e) {
-      console.warn("[getCatalogAttributes] Failed to load from cloud:", e);
-      return {};
+      console.error("Error fetching stats:", e);
+      return { revenue: 0, cost: 0, ar: 0, topSeller: { name: '-', sales: 0, revenue: 0 }, productsCount: 0, criticalStock: [], agingDebtors: [], deadStock: [] };
     }
   },
 
-  async addCatalogAttribute(type: string, value: string) {
-
-    // 2. Try Supabase
-    try {
-      const { data, error } = await supabase.from('catalog_attributes').insert([{ type, value }]).select('id');
-      if (error) {
-        if ((error as any).status === 401) return [{ success: true, cloudError: true }];
-        throw error;
-      }
-      return data;
-    } catch (e) {
-      console.error("[addCatalogAttribute] Cloud error:", e);
-      return [{ success: true }];
-    }
-  },
-
-  async deleteCatalogAttribute(type: string, value: string) {
-
-    // 2. Try Supabase
-    try {
-      const { error } = await supabase
-        .from('catalog_attributes')
-        .delete()
-        .match({ type, value });
-      if (error) {
-        if ((error as any).status === 401) return true;
-        throw error;
-      }
-      return true;
-    } catch (e) {
-      console.error("[deleteCatalogAttribute] Cloud error:", e);
-      return true;
-    }
-  },
-
-  async getSandboxStatus() {
+  getSandboxStatus: async () => {
     return { isSandbox: false };
   },
 
-  searchProducts: async (code: string, category?: string) => {
-
-    // 2. Fallback to Supabase
-    let query = supabase
-      .from('variants')
-      .select(`${VARIANT_SELECT}, products!inner(${PRODUCT_SELECT}, status)`)
-      .neq('products.status', 'deleted');
-
-    if (code) {
-      const cleanTerm = code.trim().replace(/%/g, '');
-      const isNumeric = /^\d+$/.test(cleanTerm);
-      
-      // Build a multi-field ILIKE query for variants and their parent products
-      if (isNumeric) {
-        // For numeric terms, prioritize SKU and Barcode but also search names/brand
-        query = query.or(`sku.ilike.%${cleanTerm}%,products(name.ilike.%${cleanTerm}%,barcode.eq.${cleanTerm},brand.ilike.%${cleanTerm}%,category.ilike.%${cleanTerm}%)`);
-      } else {
-        // For text terms, search across all relevant fields
-        query = query.or(`sku.ilike.%${cleanTerm}%,color.ilike.%${cleanTerm}%,size.ilike.%${cleanTerm}%,products(name.ilike.%${cleanTerm}%,brand.ilike.%${cleanTerm}%,category.ilike.%${cleanTerm}%)`);
-      }
-    }
-
-    if (category && category !== 'Todas') {
-      query = query.eq('products.category', category);
-    }
-
-    const { data, error } = await query.limit(5000);
-    
-    if (error) throw error;
-      return (data || []).filter((v: any) => {
-        const name = (v.products?.name || "").toLowerCase();
-        if (!name || name.trim() === "") return false;
-        return true;
-      }).map((v: any) => {
-        const prices = api._mapPrices(v);
-
-        return {
-          ...v,
-          variant_id: v.id, 
-          name: v.products?.name,
-          category: v.products?.category,
-          brand: v.products?.brand,
-          season: v.products?.season,
-          barcode: v.products?.barcode,
-          provider_info: v.products?.provider_info,
-          ...prices
-        };
-      });
-  },
-
   getProductsWithStock: async (category?: string) => {
-
-    // 2. Fallback to Supabase
-    let query = supabase
-      .from('variants')
-      .select(`${VARIANT_SELECT}, products!inner(${PRODUCT_SELECT}, status, store_id)`)
-      .neq('products.status', 'deleted');
-
-    const storeId = getCurrentStoreId();
-    if (storeId) {
-      query = query.eq('store_id', storeId);
-    }
-
-    if (category && category !== 'Todas') {
-      query = query.eq('products.category', category);
-    }
-
-    const { data, error } = await query.order('id', { foreignTable: 'products', ascending: false }).limit(5000);
+    // Local-First: Read from Dexie
+    let variants = await db.variants.toArray();
     
-    if (error) throw error;
-    return (data || []).filter((v: any) => {
-      const name = (v.products?.name || "").toLowerCase();
-      if (!name || name.trim() === "") return false;
-      return true;
-    }).map((v: any) => {
-      const prices = api._mapPrices(v);
-      return {
-        ...v,
-        variant_id: v.id,
-        name: v.products?.name,
-        category: v.products?.category,
-        brand: v.products?.brand,
-        season: v.products?.season,
-        barcode: v.products?.barcode,
-        provider_info: v.products?.provider_info,
-        ...prices
-      };
-    });
+    if (category && category !== 'Todas') {
+      // We need to join with products to filter by category
+      const products = await db.products.where('category').equals(category).toArray();
+      const productIds = new Set(products.map(p => p.id));
+      variants = variants.filter(v => Boolean(v.product_id && productIds.has(v.product_id)));
+    }
+
+    // Map to the format expected by the POS, including price mapping
+    const results = await Promise.all(variants.map(async (v) => {
+      // DEFENSIVE GUARD: Dexie throws if ID is undefined/null
+      if (!v.product_id || !isUUID(v.product_id)) {
+        console.warn('⚠️ [api.getProductsWithStock] Variant missing valid product_id:', v);
+        return null;
+      }
+
+      const product = await db.products.get(v.product_id);
+      if (!product || product.status === 'deleted') return null;
+
+      return mappers.mapVariantFromDB(v, product);
+    }));
+
+    return results.filter(r => r !== null) as any[];
   },
 
-  searchClients: async (query: string) => {
-    // 'clients' table columns: id, name, dni_tax_id, phone, debt_balance, credit_limit
-    // NOTE: 'email' does NOT exist in clients table — removed
+  searchProducts: async (term: string, category?: string) => {
+    // Local-First: Read from Dexie
+    const normalizedTerm = term.toLowerCase();
+    
+    // 1. Get products that match the name or barcode
+    let products = await db.products
+      .filter(p => 
+        p.status !== 'deleted' && 
+        (p.name.toLowerCase().includes(normalizedTerm) || (p.barcode?.includes(normalizedTerm) ?? false))
+      )
+      .toArray();
+
+    if (category && category !== 'Todas') {
+      products = products.filter(p => p.category === category);
+    }
+
+    const productIds = new Set(products.map(p => p.id));
+
+    // 2. Get variants that match the SKU or belong to matched products
+    const variants = await db.variants
+      .filter(v => 
+        Boolean(v.sku?.toLowerCase().includes(normalizedTerm) || 
+        (v.product_id && productIds.has(v.product_id)))
+      )
+      .toArray();
+
+    // 3. Map and merge
+    const results = await Promise.all(variants.map(async (v) => {
+      // DEFENSIVE GUARD: Dexie throws if ID is undefined/null
+      if (!v.product_id || !isUUID(v.product_id)) {
+        console.warn('⚠️ [api.searchProducts] Variant missing valid product_id:', v);
+        return null;
+      }
+
+      const product = await db.products.get(v.product_id);
+      if (!product || product.status === 'deleted') return null;
+      if (category && category !== 'Todas' && product.category !== category) return null;
+
+      return mappers.mapVariantFromDB(v, product);
+    }));
+
+    return results.filter(r => r !== null) as any[];
+  },
+
+  searchClients: async (term: string) => {
+    const storeId = await getCurrentStoreId();
     const { data, error } = await supabase
       .from('clients')
-      .select('id, name, dni_tax_id, phone, debt_balance, credit_limit')
-      .or(`name.ilike.%${query}%,dni_tax_id.ilike.%${query}%`)
+      .select('*')
+      .eq('store_id', storeId)
+      .or(`name.ilike.%${term}%,dni_tax_id.ilike.%${term}%`)
       .limit(10);
-    
-    if (error) throw error;
-    return data;
+
+    if (error) return [];
+    return data || [];
   },
 
   getClients: async () => {
+    const storeId = await getCurrentStoreId();
+    if (!storeId) return [];
+
     const { data, error } = await supabase
       .from('clients')
-      .select('id, name, dni_tax_id, phone, debt_balance, credit_limit')
-      .order('name', { ascending: true })
-      .limit(50);
-    
-    if (error) throw error;
-    return data;
+      .select('*')
+      .eq('store_id', storeId)
+      .order('name');
+
+    if (error) return [];
+    return data || [];
   },
 
-  createClient: async (clientData: {
-    name: string;
-    dni_tax_id?: string;
-    phone?: string;
-    credit_limit?: number;
-  }) => {
+  createClient: async (client: any) => {
+    const storeId = await getCurrentStoreId();
+    if (!storeId) throw new Error("No autenticado");
+
+    const payload = api._removeUndefined({
+      ...client,
+      store_id: storeId
+    });
+
     const { data, error } = await supabase
       .from('clients')
-      .insert([{
-        ...clientData,
-        debt_balance: 0
-      }])
+      .insert(payload)
       .select()
       .single();
-    
+
     if (error) throw error;
+    window.dispatchEvent(new CustomEvent('refresh-clients'));
     return data;
   },
 
-  processSaleRPC: async (saleData: {
-    clientId: string | number | null;
-    userId: string | number;
-    cart: any[];
-    total: number;
-    payments: { cash: number; credit: number; storeCredit: number };
-    seller: string;
-  }) => {
-    const { data, error } = await supabase.rpc('procesar_venta_v2', {
-      p_client_id: saleData.clientId,
-      p_user_id: saleData.userId,
-      p_cart: saleData.cart,
-      p_total: saleData.total,
-      p_payments: saleData.payments,
-      p_vendedor: saleData.seller
-    });
-
-    if (error) throw error;
-    return data;
-  },
-
-  processSaleV3: async (payload: any) => {
-    const storeId = getCurrentStoreId();
-    const { data, error } = await supabase.rpc('procesar_venta_v3', {
-      ...payload,
-      p_store_id: storeId
-    });
-    if (error) throw error;
-    return data;
-  },
-  processSaleV4: async (payload: any) => {
-    const { data, error } = await supabase.rpc('procesar_venta_v4', payload);
-    if (error) throw error;
-    return data;
-  },
-
-
-  getUsers: async () => {
-
-    // 2. Fallback to Supabase
-    try {
-      const { data: { session } } = await supabase.auth.getSession();
-      
-      if (!session) {
-        console.warn("ℹ️ [Cloud Auth] No session. Skipping profiles fetch.");
-        return []; 
-      }
-
-      // 2a. Try profiles
-      const { data: profiles, error: pErr } = await supabase
-        .from('profiles')
-        .select('id, name, role, email, store_id')
-        .order('name');
-      
-      if (!pErr && profiles && profiles.length > 0) return profiles;
-
-      // 2b. Try legacy users table
-      const { data: users, error: uErr } = await supabase
-        .from('users')
-        .select('id, name, role, email')
-        .order('name');
-      
-      if (!uErr && users && users.length > 0) return users;
-    } catch (e) {
-      console.warn("[Cloud Sync] Failed to fetch users from Supabase.", e);
-    }
-
-    // 3. Fallback to Demo Users if everything else fails (essential for first-time setup or demo accounts)
-    const demoUsers = [
-      { id: '3c92c3b1-35bd-4008-b234-9d8a847239fa', name: 'Gabi Administrator', email: 'admin@arcadia.com', role: 'admin' },
-      { id: '73a40975-3fcd-42d7-ad4b-513ed6e6e711', name: 'Stock Manager', email: 'stock@arcadia.com', role: 'stock-manager' },
-      { id: '12236d56-2e3c-49fb-8c62-12c36ddcf0ba', name: 'Vendedor', email: 'vendedor@arcadia.com', role: 'seller' }
-    ];
-    
-    console.log("ℹ️ Usando usuarios de demostración como fallback");
-    return demoUsers;
-  },
-
-  getSales: async (limit = 200) => {
-
-    let query = supabase
-      .from('sales')
-      .select(`
-        id,
-        timestamp,
-        total,
-        discount,
-        payment_method,
-        payment_details,
-        status,
-        void_reason,
-        voided_at,
-        user_id,
-        users (
-          name
-        ),
-        client_id,
-        clients (
-          name,
-          dni_tax_id
-        )
-      `);
-    
-    const storeId = getCurrentStoreId();
-    if (storeId) query = query.eq('store_id', storeId);
-
-    const { data, error } = await query
-      .order('timestamp', { ascending: false })
-      .limit(limit);
-    if (error) {
-      if ((error as any).status === 401 || (error as any).status === 400) return [];
-      throw error;
-    }
-    return data || [];
-  },
-
-  getSalesForPeriod: async (from: string, to: string) => {
-
-    // 2. Fallback to Supabase
-    const { data, error } = await supabase
-      .from('sales')
-      .select(`
-        id,
-        timestamp,
-        total,
-        discount,
-        payment_method,
-        payment_details,
-        status,
-        void_reason,
-        voided_at,
-        user_id,
-        users (
-          name
-        ),
-        client_id,
-        clients (
-          name,
-          dni_tax_id
-        )
-      `)
-      .gte('timestamp', from)
-      .lte('timestamp', to)
-      .order('timestamp', { ascending: false });
-    if (error) {
-      if ((error as any).status === 401 || (error as any).status === 400) return [];
-      throw error;
-    }
-    return data || [];
-  },
-
-  getSaleItems: async (saleId: number) => {
-    const { data, error } = await supabase
-      .from('sale_items')
-      .select(`
-        id,
-        quantity,
-        price_at_sale,
-        variants (
-          id,
-          sku,
-          size,
-          color,
-          cost,
-          products (
-            name,
-            category
-          )
-        )
-      `)
-      .eq('sale_id', saleId);
-    if (error) throw error;
-    return data || [];
-  },
-
-
-  voidSale: async (saleId: number, reason: string, userId: number) => {
-    const { error } = await supabase.rpc('anular_venta_v1', {
+  voidSale: async (saleId: string, reason: string, userId: string) => {
+    const storeId = await getCurrentStoreId();
+    const { error } = await supabase.rpc('anular_venta', {
       p_sale_id: saleId,
-      p_reason: reason,
-      p_user_id: userId
+      p_store_id: storeId,
+      p_user_id: userId,
+      p_reason: reason
     });
     if (error) throw error;
+    window.dispatchEvent(new CustomEvent('refresh-sales'));
+    window.dispatchEvent(new CustomEvent('refresh-stock'));
     return true;
   },
 
   createProduct: async (productData: any) => {
+    const storeId = await getCurrentStoreId();
+    if (!storeId) throw new Error("No autenticado");
 
-    // 2. Try Supabase (only if we have a valid session to avoid 401 errors)
-    const { data: { session } } = await supabase.auth.getSession();
-    if (!session) {
-      console.log("ℹ️ [Cloud Sync] No active session. Skipping cloud synchronization.");
-      return { id: 'local-' + Date.now(), ...productData };
+    const { variants, ...fields } = productData;
+    const payload = mappers.mapProductToDB({ ...fields, storeId, status: fields.status || 'active' });
+
+    const { data: newProduct, error: pError } = await supabase
+      .from('products')
+      .insert(payload)
+      .select()
+      .single();
+
+    if (pError) throw pError;
+    const product = newProduct;
+
+    if (variants && variants.length > 0) {
+      const cleanVariants = variants.map((v: any) => {
+        const dbVariant = mappers.mapVariantToDB({ ...v, storeId });
+        
+        // Ensure id is GONE (PostgreSQL will generate UUID)
+        // Ensure product_id is correctly set
+        return {
+          ...dbVariant,
+          product_id: product.id,
+          stock: 0 // No direct stock insertion as per rule
+        };
+      });
+      
+      const { error: vError } = await supabase
+        .from('variants')
+        .insert(cleanVariants);
+
+      if (vError) throw vError;
+
+      // 3. Volver a consultar las variantes ya guardadas (GROUND TRUTH)
+      const { data: persistedVariants, error: fetchError } = await supabase
+        .from('variants')
+        .select('*')
+        .eq('product_id', product.id)
+        .eq('store_id', storeId);
+
+      if (fetchError) {
+        console.error("Error re-fetching variants for history:", fetchError);
+      } else if (persistedVariants && persistedVariants.length > 0) {
+        // 4. Registrar stock inicial vía RPC adjust_stock (SOLO esta función toca stock)
+        for (const variant of persistedVariants) {
+          const originalVariantData = variants.find((v: any) => v.sku === variant.sku);
+          const initialStock = Number(originalVariantData?.stock || 0);
+          
+          if (initialStock > 0) {
+            try {
+              // Nueva firma: p_variant_id (uuid), p_quantity (int), p_reason (text), p_user_id (uuid)
+              await supabase.rpc('adjust_stock', {
+                p_variant_id: variant.id,
+                p_quantity: initialStock,
+                p_reason: 'Carga inicial (Alta de producto)',
+                p_user_id: storeId
+              });
+            } catch (err) {
+              console.error(`Error adjusting initial stock for variant ${variant.sku}:`, err);
+            }
+          }
+        }
+      }
+    }
+    // Mirror to local Dexie
+    try {
+      const { data: freshProd } = await supabase
+        .from('products')
+        .select(`*, variants(*)`)
+        .eq('id', product.id)
+        .single();
+        
+      if (freshProd) {
+        const { variants: freshVariants, ...prodFields } = freshProd;
+        await LocalRepository.upsertProducts([prodFields]);
+        if (freshVariants) await LocalRepository.upsertVariants(freshVariants);
+      }
+    } catch (e) {
+      console.warn("Mirror error after creation:", e);
+    }
+ 
+    window.dispatchEvent(new CustomEvent('refresh-stock'));
+    window.dispatchEvent(new CustomEvent('refresh-attributes'));
+    return product;
+  },
+
+  updateProduct: async (id: string, productData: any) => {
+    // Delegar al servicio unificado para asegurar que se ejecuten todas las sincronizaciones y logs
+    return api.unifiedProductUpdate(id, {
+      ...productData,
+      updateReason: 'EDITOR COMPLETO'
+    });
+  },
+
+  restoreProduct: async (id: UUID) => {
+    const storeId = await getCurrentStoreId();
+    if (!storeId) throw new Error("No autenticado");
+
+    // 1. Obtener variantes del producto para registrarlas antes de borrar
+    const { error: vError } = await supabase
+      .from('variants')
+      .select('*')
+      .eq('product_id', id)
+      .eq('store_id', storeId);
+
+    if (vError) throw vError;
+
+    // 2. Restaurar producto
+    const { error: dpError } = await supabase
+      .from('products')
+      .update({ status: 'active' })
+      .eq('id', id)
+      .eq('store_id', storeId);
+
+    if (dpError) throw dpError;
+
+    window.dispatchEvent(new CustomEvent('refresh-stock'));
+    return true;
+  },
+
+  deleteProduct: async (id: UUID) => {
+    const storeId = await getCurrentStoreId();
+    if (!storeId) throw new Error("No autenticado");
+
+    // 1. Obtener datos del producto y sus variantes
+    const { data: productData, error: pError } = await supabase
+      .from('products')
+      .select('name')
+      .eq('id', id)
+      .single();
+      
+    if (pError) console.warn("No se pudo obtener el nombre del producto para el log", pError);
+    const productName = productData?.name || 'Producto Eliminado';
+
+    const { data: variants, error: vError } = await supabase
+      .from('variants')
+      .select('*')
+      .eq('product_id', id)
+      .eq('store_id', storeId);
+
+    if (vError) throw vError;
+
+    // 2. Registrar movimientos de baja para cada variante
+    for (const variant of variants || []) {
+      try {
+        await supabase.rpc('adjust_stock', {
+          p_variant_id: variant.id,
+          p_quantity: variant.stock || 0,
+          p_type: 'EGRESO',
+          p_reason: `Baja (Eliminado): ${productName}`,
+          p_description: `Variante eliminada: ${variant.size || 'Único'} - ${variant.color || 'Único'}`,
+          p_store_id: storeId,
+          p_user_id: storeId
+        });
+      } catch (err) {
+        console.error("Error logging deletion movement:", err);
+      }
     }
 
-    // Separate variants — they belong to the 'variants' table, not 'products'
-    const { variants, ...productFields } = productData;
+    // 3. Eliminar variantes (Primero las variantes por integridad referencial)
+    const { error: dvError } = await supabase
+      .from('variants')
+      .delete()
+      .eq('product_id', id)
+      .eq('store_id', storeId);
+
+    if (dvError) throw dvError;
+
+    // 4. Eliminar producto
+    const { error: dpError } = await supabase
+      .from('products')
+      .delete()
+      .eq('id', id)
+      .eq('store_id', storeId);
+
+    if (dpError) throw dpError;
+
+    window.dispatchEvent(new CustomEvent('refresh-stock'));
+    return true;
+  },
+
+  // BRIDGE: Recibe el payload del POS y lo guarda localmente (Variant-Only Model)
+  processSale: async (payload: { saleData: any, items: any[] }) => {
+    const storeId = await getCurrentStoreId();
+    const { saleData: rawSale, items: rawItems } = payload;
+
+    // 1. Final Normalization for Local Repository
+    const saleData = {
+      id: rawSale.id,
+      user_id: rawSale.user_id,
+      store_id: storeId,
+      client_id: rawSale.client_id || null,
+      total: Number(rawSale.total || 0),
+      payment_method: rawSale.payment_method || 'Efectivo',
+      cash_amount: Number(rawSale.cash_amount || 0),
+      credit_amount: Number(rawSale.credit_amount || 0),
+      store_credit_amount: Number(rawSale.store_credit_amount || 0),
+      vendedor: rawSale.vendedor,
+      payments: rawSale.payments // Pass through for sync queue
+    };
+
+    const items = (rawItems || []).map((item: any) => {
+      const variant_id = item.variant_id;
+      const priceAtSale = Number(item.price_at_sale || 0);
+
+      if (!variant_id) throw new Error("Item en venta no tiene variant_id");
+      if (priceAtSale <= 0) throw new Error(`Precio inválido para variante ${variant_id}`);
+
+      return {
+        variant_id,
+        quantity: Number(item.quantity || 0),
+        price_at_sale: priceAtSale
+      };
+    });
+
+    // 1.5 Final Gate: Strict validation before touch DB
+    validateSyncPayload({ items, saleData: { total: saleData.total } });
+
+    // 2. Guardar en Dexie de forma atómica
+    const saleId = await LocalRepository.createSale(saleData, items);
+    
+    window.dispatchEvent(new CustomEvent('refresh-sales'));
+    window.dispatchEvent(new CustomEvent('refresh-stock'));
+    return { id: saleId, success: true };
+  },
+
+  processSaleCloud: async (params: any) => {
+    console.log("RPC FUNCTION: procesar_venta");
+    console.log("RPC PAYLOAD:", params);
+    
+    const { data, error } = await supabase.rpc('procesar_venta', params);
+    
+    if (error) {
+      console.error("========== SUPABASE RPC ERROR ==========");
+      console.error("RPC NAME:", 'procesar_venta');
+      console.error("RPC PAYLOAD:", params);
+      console.error("FULL ERROR:", error);
+      console.error("MESSAGE:", error.message);
+      console.error("DETAILS:", error.details);
+      console.error("HINT:", error.hint);
+      console.error("CODE:", error.code);
+
+      throw {
+        message: error.message || 'Remote sync failed',
+        details: error.details || null,
+        hint: error.hint || null,
+        code: error.code || null,
+        raw: error
+      };
+    }
+    return data;
+  },
+
+  processSaleLocal: async (saleData: any) => {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 3000); 
+    
+    // Map p_ fields to local server format (camelCase)
+    const mappedData = {
+      clientId: saleData.p_client_id,
+      userId: saleData.p_user_id,
+      cart: (saleData.p_cart || []).map((item: any) => ({
+        id: item.variant_id,
+        quantity: item.quantity,
+        pvp: item.price
+      })),
+      total: saleData.p_total,
+      paymentMethod: 'Venta POS',
+      payments: {
+        cash: (saleData.p_payments || []).filter((p: any) => p.type === 'cash').reduce((acc: number, p: any) => acc + p.finalAmount, 0) || 0,
+        credit: (saleData.p_payments || []).filter((p: any) => p.type === 'credit' || p.type === 'qr' || p.type === 'debit').reduce((acc: number, p: any) => acc + p.finalAmount, 0) || 0,
+        storeCredit: (saleData.p_payments || []).filter((p: any) => p.type === 'storeCredit').reduce((acc: number, p: any) => acc + p.finalAmount, 0) || 0
+      }
+    };
 
     try {
-      // Insert the product row
-      // Clean fields that don't exist in the 'products' table (they are for variants or UI)
-      const { 
-        price_cash, price_debit, price_credit, margin, 
-        pvp, cost, base_margin, base_price,
-        ...cleanFields 
-      } = productFields;
-
-      const storeId = getCurrentStoreId();
-      const finalProductFields = {
-        ...cleanFields,
-        status: cleanFields.status || 'active',
-        store_id: storeId,
-        provider_info: cleanFields.provider_info ? (typeof cleanFields.provider_info === 'string' ? cleanFields.provider_info : JSON.stringify(cleanFields.provider_info)) : null
-      };
-
-      const { data, error } = await supabase
-        .from('products')
-        .insert([finalProductFields])
-        .select('id, name, category, brand, season, barcode, status')
-        .single();
+      const response = await fetch('http://localhost:5000/api/sales', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(mappedData),
+        signal: controller.signal
+      });
       
-      if (error) {
-        if (error.code === '42501' || (error as any).status === 401) {
-          console.warn("⚠️ [Cloud Auth] Unauthorized to create product in Supabase. Only local saved.");
-          return { id: 'local-' + Date.now(), status: 'active', ...productFields };
-        }
-        throw error;
+      clearTimeout(timeoutId);
+      
+      if (!response.ok) {
+        const err = await response.json();
+        throw new Error(err.error || 'Fallo en servidor local');
       }
-
-      // 3. Insert variants linked to the new product (Cloud)
-      if (Array.isArray(variants) && variants.length > 0) {
-        const variantRows = variants.map(({ id, debitPrice, creditPrice, ...v }: any) => {
-          let finalPvp = Number(v.pvp || 0);
-          if (finalPvp <= 0 && Number(v.cost) > 0) {
-            finalPvp = Math.round(Number(v.cost) * (1 + (Number(v.margin) || 0) / 100));
-          }
-          return {
-            sku: v.sku,
-            size: v.size,
-            color: v.color,
-            stock: v.stock,
-            stock_minimo: v.stock_minimo,
-            cost: v.cost,
-            margin: v.margin,
-            pvp: finalPvp,
-            is_custom: v.is_custom,
-            product_id: data.id,
-            store_id: storeId
-          };
-        });
-        const { data: vData, error: vErr } = await supabase.from('variants').insert(variantRows).select();
-        if (vErr) {
-          console.error("❌ [Cloud Sync] Variants sync failed:", vErr);
-        } else if (vData) {
-          // Get current user ID for the audit log
-          const savedUser = localStorage.getItem('arcadia_user');
-          const userId = savedUser ? JSON.parse(savedUser).id : 1;
-
-          // Record initial stock movements for each variant that has stock
-          const movements = vData
-            .filter((v: any) => v.stock > 0)
-            .map((v: any) => ({
-              variant_id: v.id,
-              user_id: userId,
-              change_amount: v.stock,
-              type: 'INGRESO',
-              reason: 'Stock inicial (Alta de producto)',
-              description: 'Carga inicial en creación de producto',
-              store_id: storeId,
-              timestamp: new Date().toISOString()
-            }));
-
-          if (movements.length > 0) {
-            const { error: mErr } = await supabase.from('stock_movements').insert(movements);
-            if (mErr) console.error("❌ [Cloud Sync] Initial movements sync failed:", mErr);
-          }
-        }
-      }
-
-      return data;
-    } catch (e) {
-      console.error("[createProduct] Cloud error:", e);
-      return { id: 'local-' + Date.now(), ...productFields };
+      return await response.json();
+    } catch (e: any) {
+      clearTimeout(timeoutId);
+      if (e.name === 'AbortError') throw new Error('Servidor local no responde (timeout)');
+      console.error("❌ [Local Sync] Error fatal:", e);
+      throw e;
     }
   },
 
+  getUsers: async () => {
+    try {
+      const storeId = await getCurrentStoreId();
+      if (!storeId) return [];
+
+      const { data, error } = await supabase
+        .from('operators')
+        .select('*')
+        .eq('store_id', storeId)
+        .order('name');
+
+      if (error) throw error;
+      return data || [];
+    } catch (e) {
+      console.error("Error fetching operators:", e);
+      return [];
+    }
+  },
+
+  createOperator: async (operator: { name: string; role: string; email?: string }) => {
+    const storeId = await getCurrentStoreId();
+    if (!storeId) throw new Error("No autenticado");
+
+    const { data, error } = await supabase
+      .from('operators')
+      .insert({ ...operator, store_id: storeId })
+      .select()
+      .single();
+
+    if (error) throw error;
+    window.dispatchEvent(new CustomEvent('refresh-operators'));
+    return data;
+  },
+
+  deleteOperator: async (id: UUID) => {
+    const storeId = await getCurrentStoreId();
+    if (!storeId) throw new Error("No autenticado");
+
+    const { error } = await supabase
+      .from('operators')
+      .delete()
+      .eq('id', id)
+      .eq('store_id', storeId);
+
+    if (error) throw error;
+    window.dispatchEvent(new CustomEvent('refresh-operators'));
+    return true;
+  },
+
+  updateOperator: async (id: UUID, data: any) => {
+    const storeId = await getCurrentStoreId();
+    if (!storeId) throw new Error("No autenticado");
+
+    const { data: updated, error } = await supabase
+      .from('operators')
+      .update(data)
+      .eq('id', id)
+      .eq('store_id', storeId)
+      .select()
+      .single();
+
+    if (error) throw error;
+    window.dispatchEvent(new CustomEvent('refresh-operators'));
+    return updated;
+  },
+
+  getSales: async (limit = 200) => {
+    const storeId = await getCurrentStoreId();
+    if (!storeId) return [];
+
+    const { data, error } = await supabase
+      .from('sales')
+      .select(`
+        id, total, payment_method, store_id, user_id, created_at
+      `)
+      .eq('store_id', storeId)
+      .order('created_at', { ascending: false })
+      .limit(limit);
+
+    if (error) return [];
+    return data || [];
+  },
+
+  getSalesForPeriod: async (from: string, to: string) => {
+    const storeId = await getCurrentStoreId();
+    if (!storeId) return [];
+
+    const { data, error } = await supabase
+      .from('sales')
+      .select(`
+        id, total, payment_method, store_id, user_id, created_at
+      `)
+      .eq('store_id', storeId)
+      .gte('created_at', from)
+      .lte('created_at', to)
+      .order('created_at', { ascending: false });
+
+    if (error) return [];
+    return data || [];
+  },
+
+  getSaleItems: async (saleId: UUID) => {
+    const storeId = await getCurrentStoreId();
+    const { data, error } = await supabase
+      .from('sale_items')
+      .select(`
+        id, quantity, unit_price, subtotal,
+        variants (sku, size, color, product:products(name))
+      `)
+      .eq('sale_id', saleId)
+      .eq('store_id', storeId);
+
+    if (error) return [];
+    return data || [];
+  },
+
+  mirrorCloudToLocal: async () => {
+    const storeId = await getCurrentStoreId();
+    if (!storeId) return;
+
+    console.log("🛠️ Initializing Local Mirror...");
+    
+    try {
+      // 1. Mirror Products
+      const { data: products } = await supabase
+        .from('products')
+        .select(PRODUCT_SELECT)
+        .eq('store_id', storeId);
+      
+      if (products) {
+        await LocalRepository.upsertProducts(products);
+        console.log(`✅ ${products.length} Products mirrored`);
+      }
+
+      // 2. Mirror Variants
+      const { data: variants } = await supabase
+        .from('variants')
+        .select(VARIANT_SELECT)
+        .eq('store_id', storeId);
+      
+      if (variants) {
+        await LocalRepository.upsertVariants(variants);
+        console.log(`✅ ${variants.length} Variants mirrored`);
+      }
+
+      // 3. Mirror Operators
+      const { data: operators } = await supabase
+        .from('operators')
+        .select('*')
+        .eq('store_id', storeId);
+      
+      if (operators) {
+        await db.operators.bulkPut(operators.map(o => ({
+          ...o,
+          sync_status: 'synced',
+          updated_at: Date.now()
+        })));
+        console.log(`✅ ${operators.length} Operators mirrored`);
+      }
+      
+      console.log("🚀 Local Mirror Complete");
+    } catch (error) {
+      console.error("❌ Mirroring Error:", error);
+    }
+  },
+
+  getProducts: async () => {
+    // Local-First: Read from Dexie
+    const localProducts = await LocalRepository.getAllProducts();
+    if (localProducts.length > 0) return localProducts;
+
+    // Fallback to cloud if local is empty (initial load)
+    const storeId = await getCurrentStoreId();
+    if (!storeId) return [];
+
+    const { data, error } = await supabase
+      .from('products')
+      .select(PRODUCT_SELECT)
+      .eq('store_id', storeId)
+      .eq('status', 'active')
+      .order('name');
+
+    if (error) return [];
+    return data || [];
+  },
+
+  getVariants: async (productId?: UUID) => {
+    // Local-First: Read from Dexie
+    if (productId) {
+      return await db.variants
+        .where('product_id').equals(String(productId))
+        .and(v => !v.deleted)
+        .toArray();
+    }
+    return await db.variants.toCollection().filter(v => !v.deleted).toArray();
+  },
+
   getAllProducts: async () => {
-
-    // 2. Fallback to Supabase
-    const { data: { session } } = await supabase.auth.getSession();
-    if (!session) return [];
-
+    const storeId = await getCurrentStoreId();
     let query = supabase
       .from('products')
       .select(PRODUCT_SELECT)
+      .eq('store_id', storeId)
       .or('status.eq.active,status.is.null');
-    
-    const storeId = getCurrentStoreId();
-    if (storeId) query = query.eq('store_id', storeId);
 
     const { data, error } = await query.order('name', { ascending: true });
-    
-    if (error) {
-      if ((error as any).status === 401) return [];
-      throw error;
-    }
 
-    // Map prices for each product
+    if (error) throw error;
+
     return (data || []).map(p => ({
       ...p,
       ...api._mapPrices(p)
@@ -771,483 +942,293 @@ export const api = {
   },
 
   getInventoryItems: async () => {
-    // Solo Supabase
-    const { data: { session } } = await supabase.auth.getSession();
-    if (!session) return [];
+    // 1. Local-First: Read from Dexie (Instant & Offline-First)
+    const localItems = await LocalRepository.getInventoryItemsWithProducts();
+    if (localItems.length > 0) return localItems;
 
-    let query = supabase
+    // 2. Fallback to Cloud (Only on initial load or if local is wiped)
+    const storeId = await getCurrentStoreId();
+    if (!storeId) return [];
+
+    const { data, error } = await supabase
       .from('variants')
-      .select(`
-        id,
-        product_id,
-        sku,
-        color,
-        size,
-        stock,
-        stock_minimo,
-        cost,
-        margin,
-        pvp,
-        is_custom,
-        products!inner (
-          name,
-          category,
-          brand,
-          season,
-          barcode,
-          provider_info,
-          base_price,
-          cost,
-          base_margin,
-          store_id
-        )
-      `)
-      .neq('products.status', 'deleted')
-      .or('status.eq.active,status.is.null', { foreignTable: 'products' });
-    
-    const storeId = getCurrentStoreId();
-    if (storeId) query = query.eq('store_id', storeId);
+      .select(`*, products(${PRODUCT_SELECT})`)
+      .eq('store_id', storeId);
 
-    const { data, error } = await query.order('id', { ascending: true });
+    if (error) return [];
     
-    if (error) {
-      if ((error as any).status === 401) return [];
-      console.error('❌ Error fetching inventory items:', error);
-      throw new Error(`Error al obtener inventario: ${error.message}`);
+    const cloudItems = (data || [])
+      .filter((v: any) => v.products && v.products.status !== 'deleted')
+      .map((v: any) => mappers.mapVariantFromDB(v, v.products));
+    
+    // Background sync to LocalRepository if we got cloud items but local was empty
+    if (cloudItems.length > 0) {
+      LocalRepository.upsertVariants(data || []).catch(console.error);
     }
-    
-    if (!data) return [];
-    
-    return data.filter((v: any) => {
-      const name = (v.products?.name || "").toLowerCase();
-      if (!name || name.trim() === "") return false;
-      return true;
-    }).map((v: any) => {
-      const prices = api._mapPrices(v);
 
-      return {
-        id: v.id,
-        product_id: v.product_id,
-        name: v.products?.name || 'Producto sin nombre',
-        sku: v.sku,
-        barcode: v.products?.barcode,
-        color: v.color && v.color !== 'N/A' ? v.color : (v.sku?.split('-')[1] || 'N/A'),
-        size: v.size && v.size !== 'N/A' ? v.size : (v.sku?.split('-')[2] || 'N/A'),
-        stock: v.stock,
-        stock_minimo: v.stock_minimo,
-        cost: v.cost,
-        margin: v.margin,
-        ...prices,
-        isCustom: v.is_custom,
-        category: v.products?.category || 'General',
-        brand: v.products?.brand || 'Genérica',
-        season: v.products?.season || 'N/A',
-        provider_info: v.products?.provider_info,
-        base_price: v.products?.base_price,
-        base_cost: v.products?.cost,
-        base_margin: v.products?.base_margin
-      };
-    });
+    return cloudItems;
   },
 
   getDeletedInventoryItems: async () => {
+    const storeId = await getCurrentStoreId();
+    if (!storeId) return [];
+
     const { data, error } = await supabase
       .from('variants')
       .select(`
-        id,
-        product_id,
-        sku,
-        color,
-        size,
-        stock,
-        stock_minimo,
-        cost,
-        margin,
-        pvp,
-        is_custom,
-        products!inner (
-          name,
-          category,
-          brand,
-          season,
-          barcode,
-          provider_info,
-          base_price,
-          cost,
-          base_margin
-        )
+        id, product_id, sku, color, size, stock, stock_minimo, cost, margin, pvp, is_custom,
+        products (name, category, brand, season, barcode, provider_info, base_price, cost, base_margin)
       `)
+      .eq('store_id', storeId)
+      .eq('products.status', 'deleted')
       .order('id', { ascending: true });
-    
-    if (error) {
-      console.error('❌ Error fetching deleted inventory items:', error);
-      throw new Error(`Error al obtener papelera: ${error.message}`);
-    }
-    
-    if (!data) return [];
-    
-    return data.map((v: any) => {
+
+    if (error) throw error;
+
+    return (data || []).map((v: any) => {
       const prices = api._mapPrices(v);
       return {
-        id: v.id,
-        product_id: v.product_id,
-        name: v.products?.name || 'Producto sin nombre',
-        sku: v.sku,
-        barcode: v.products?.barcode,
-        color: v.color,
-        size: v.size,
-        stock: v.stock,
-        stock_minimo: v.stock_minimo,
-        cost: v.cost,
-        margin: v.margin,
+        ...v,
+        name: v.products?.name,
         ...prices,
-        isCustom: v.is_custom,
-        category: v.products?.category || 'General',
-        brand: v.products?.brand || 'Genérica',
-        season: v.products?.season || 'N/A',
-        provider_info: v.products?.provider_info,
-        base_price: v.products?.base_price,
-        base_cost: v.products?.cost,
-        base_margin: v.products?.base_margin
+        category: v.products?.category,
+        brand: v.products?.brand,
+        season: v.products?.season,
+        provider_info: v.products?.provider_info
       };
     });
   },
 
-  deleteProduct: async (id: number) => {
-    const { error } = await supabase
-      .from('products')
-      .delete()
-      .eq('id', id);
-    
-    if (error) throw error;
-    return true;
-  },
-
-  /**
-   * Lightweight update for base financial fields on the products table only.
-   * Use this instead of updateProduct() when you only need to patch cost/base_margin
-   * without touching variants — avoids calling the full update_product_v2 RPC with
-   * incomplete data.
-   */
-  updateProductBase: async (id: number, fields: { cost?: number; base_margin?: number; base_price?: number; provider_info?: string }) => {
+  updateProductBase: async (id: UUID, fields: { cost?: number; base_margin?: number; base_price?: number; provider_info?: string }) => {
+    const storeId = await getCurrentStoreId();
     const { error } = await supabase
       .from('products')
       .update(fields)
-      .eq('id', id);
+      .eq('id', id)
+      .eq('store_id', storeId);
     if (error) throw error;
+    
+    // Mirror to local Dexie
+    try {
+      const { data: freshProd } = await supabase
+        .from('products')
+        .select(`*, variants(*)`)
+        .eq('id', id)
+        .single();
+        
+      if (freshProd) {
+        const { variants: freshVariants, ...prodFields } = freshProd;
+        await LocalRepository.upsertProducts([prodFields]);
+        if (freshVariants) await LocalRepository.upsertVariants(freshVariants);
+      }
+    } catch (e) {
+      console.warn("Mirror error after updateProductBase:", e);
+    }
+
+    window.dispatchEvent(new CustomEvent('refresh-stock'));
     return true;
   },
 
-  async updateProduct(id: number, productData: any) {
-    // 1. Extraemos SOLO los campos que queremos actualizar
-    // y descartamos los que causan el error 409
-    const dataToUpdate = {
-      name: productData.name,
-      status: productData.status,
-      category: productData.category,
-      brand: productData.brand,
-      season: productData.season,
-      base_margin: productData.base_margin,
-      iva_rate: productData.iva_rate
-    };
-
-    // 2. Ejecutamos la actualización solo con esos campos
-    const { data, error } = await supabase
-      .from('products')
-      .update(dataToUpdate)
-      .eq('id', id)
-      .select();
-
-    if (error) throw error;
-    return data?.[0] || productData;
-  },
-
   massPriceAdjust: async (percentage: number) => {
+    const storeId = await getCurrentStoreId();
     const { data, error } = await supabase.rpc('mass_price_adjust', {
-      p_percentage: percentage
+      p_percentage: percentage,
+      p_store_id: storeId
     });
     if (error) throw error;
+    await api.mirrorCloudToLocal();
+    window.dispatchEvent(new CustomEvent('refresh-stock'));
     return data;
   },
 
   massMarginAdjust: async (newMargin: number) => {
+    const storeId = await getCurrentStoreId();
     const { data, error } = await supabase.rpc('mass_margin_adjust', {
-      p_margin: newMargin
+      p_margin: newMargin,
+      p_store_id: storeId
     });
     if (error) throw error;
+    await api.mirrorCloudToLocal();
+    window.dispatchEvent(new CustomEvent('refresh-stock'));
     return data;
   },
 
-  getProductVariants: async (id: number) => {
+  getProductVariants: async (id: UUID) => {
+    const storeId = await getCurrentStoreId();
     const { data, error } = await supabase
       .from('variants')
       .select(VARIANT_SELECT)
-      .eq('product_id', id);
-    
+      .eq('product_id', id)
+      .eq('store_id', storeId);
+
     if (error) throw error;
     return data;
   },
 
-  updateVariant: async (id: number, data: any) => {
+  updateVariant: async (id: UUID, data: any) => {
+    const storeId = await getCurrentStoreId();
+    
+    const dbVariant = mappers.mapVariantToDB({ ...data, storeId });
+    
+    // REMOVE product_id and id from the update payload
+    // postgres_changes callbacks after subscribe() will fail if we send product_id in some RLS setups
+    const { id: _, product_id: __, ...updatePayload } = dbVariant;
+
     const { error } = await supabase
       .from('variants')
-      .update(data)
-      .eq('id', id);
+      .update(updatePayload)
+      .eq('id', id)
+      .eq('store_id', storeId);
+      
     if (error) throw error;
+    window.dispatchEvent(new CustomEvent('refresh-stock'));
     return true;
   },
 
-  bulkInventoryEntry: async (items: any[], userId: number) => {
-    const eventId = `ARRIVAL_${Date.now()}`;
-    const { data, error } = await supabase.rpc('bulk_inventory_entry', {
-      p_items: items,
-      p_user_id: userId,
-      p_event_id: eventId
+
+  updateStock: async (id: UUID, quantity: number, type: string, reason: string, userId: UUID) => {
+    if (!isUUID(id)) throw new Error("Invalid Variant UUID");
+    const storeId = await getCurrentStoreId();
+    if (!storeId) throw new Error("No autenticado");
+
+    // Calcular impacto (positivo o negativo)
+    const impact = type === 'INGRESO' ? Math.abs(quantity) : -Math.abs(quantity);
+
+    // Actualizar stock y registrar movimiento vía RPC (Único punto de entrada)
+    // Firma: p_variant_id (uuid), p_quantity (int), p_reason (text), p_user_id (uuid)
+    const { error: uError } = await supabase.rpc('adjust_stock', {
+      p_variant_id: id,
+      p_quantity: impact,
+      p_reason: reason || 'Ajuste manual',
+      p_user_id: userId || storeId
     });
-    
-    if (error) throw error;
-    return data;
-  },
 
-  updateStock: async (id: number, quantity: number, type: string, description: string, reason: string, userId: number, sku?: string) => {
-    const operatorEmail = localStorage.getItem('operator_email') || 'admin@arcadia.com';
-
-    // 1. Ejecución directa en Supabase (Cloud-Only)
-    const { data: { session } } = await supabase.auth.getSession();
-    if (!session) {
-      console.log("ℹ️ [Cloud Sync] No active session. Skipping cloud synchronization.");
-      return { success: true };
-    }
-
-    // If we have a SKU, try to find the correct variant ID in Supabase first to avoid 409 Conflicts
-    let cloudVariantId = id;
-    if (sku) {
-      try {
-        const { data: vData } = await supabase
-          .from('variants')
-          .select('id')
-          .eq('sku', sku)
-          .maybeSingle();
-        if (vData) cloudVariantId = vData.id;
-      } catch (e) {
-        console.warn("[Cloud Sync] Failed to resolve variant ID by SKU:", e);
-      }
-    }
-
-    const { data, error } = await supabase.rpc('update_inventory_stock', {
-      p_variant_id: cloudVariantId,
-      p_quantity: quantity,
-      p_type: type,
-      p_description: description || '',
-      p_reason: reason || '',
-      p_user_id: userId
-    });
-    
-    if (error) {
-      if (error.code === '23503' || (error as any).status === 409) {
-        console.warn(`⚠️ [Cloud Sync] Variant ${sku || id} not found in Supabase. Local change preserved.`);
-        return { success: true };
-      }
-      throw error;
-    }
-    return data;
+    if (uError) throw uError;
+ 
+    window.dispatchEvent(new CustomEvent('refresh-stock'));
+    return true;
   },
 
   getProductByBarcode: async (barcode: string) => {
-    // IMPORTANT: When using embedded joins (variants), filter columns MUST be
-    // included in the select — otherwise PostgREST returns 400.
+    const storeId = await getCurrentStoreId();
     const { data, error } = await supabase
       .from('products')
       .select(`${PRODUCT_SELECT}, status, variants(${VARIANT_SELECT})`)
       .eq('barcode', barcode)
+      .eq('store_id', storeId)
       .neq('status', 'deleted')
       .limit(1);
 
     if (error || !data || data.length === 0) return null;
-    // JS-side safety filter in case the DB column is null/undefined
-    const result = data.find((p: any) => p.status !== 'deleted');
-    return result ?? null;
+    return data[0];
   },
-  
-  getProductById: async (id: number) => {
-    if (!id || isNaN(id)) return null;
-    
-    // 1. Try local server first (unless confirmed down)
 
-    // 2. Fallback to Supabase
+  getProductById: async (id: string) => {
+    if (!id) return null;
+    const storeId = await getCurrentStoreId();
+
     try {
+      if (!id || !isUUID(id)) {
+        console.warn('⚠️ [api.getProductById] Invalid product ID:', id);
+        return null;
+      }
       const { data, error } = await supabase
         .from('products')
         .select(`${PRODUCT_SELECT}, variants(${VARIANT_SELECT})`)
         .eq('id', id)
+        .eq('store_id', storeId)
         .single();
-      
+
       if (error || !data) return null;
-      
-      const prices = api._mapPrices(data);
-      const processedProduct = {
-        ...data,
-        ...prices,
-        variants: Array.isArray(data.variants) ? data.variants : []
-      };
 
-
-      return processedProduct;
+      return { ...data, ...api._mapPrices(data), variants: data.variants || [] };
     } catch (e) {
-      console.error(`[Cloud Fetch Error] ID ${id}:`, e);
       return null;
     }
   },
 
   getVariantBySku: async (sku: string) => {
+    const storeId = await getCurrentStoreId();
     const { data, error } = await supabase
       .from('variants')
-      .select(`${VARIANT_SELECT}, products!inner(${PRODUCT_SELECT})`)
+      .select(`${VARIANT_SELECT}, products(${PRODUCT_SELECT})`)
       .eq('sku', sku)
+      .eq('store_id', storeId)
       .maybeSingle();
     if (error) return null;
     return data;
   },
 
+
   getInventoryHistory: async (limit = 50, offset = 0) => {
-    // 1. Carga directa desde Supabase (Cloud-Only)
-    try {
-      const safeLimit = typeof limit === 'number' ? limit : 50;
-      const safeOffset = typeof offset === 'number' ? offset : 0;
+    const storeId = await getCurrentStoreId();
 
-      console.log("🔍 [API] Intentando cargar historial desde inventory_logs...");
+    const { data, error } = await supabase.rpc('get_inventory_history', {
+      p_store_id: storeId,
+      p_limit: limit,
+      p_offset: offset
+    });
 
-      // 2. Fetch from the NEW inventory_logs table as requested
-      const { data, error } = await supabase
-        .from('inventory_logs')
-        .select('*') // Seleccionamos todo para evitar fallos por columnas faltantes
-        .order('created_at', { ascending: false })
-        .range(safeOffset, safeOffset + safeLimit - 1);
-      
-      if (error) {
-        console.error('❌ Error crítico de Supabase en historial:', error.message, error.details);
-        return [];
-      }
-      
-      console.log("📊 [API] Datos recibidos de inventory_logs:", data?.length || 0, "filas");
-      
-      if (!data || data.length === 0) {
-        console.warn("⚠️ La tabla inventory_logs parece estar vacía.");
-        return [];
-      }
-      
-      return data.map((log: any) => {
-        // Map action types to our UI types
-        let movType = 'otros';
-        const action = (log.action_type || '').toUpperCase();
-        if (action === 'INSERT') movType = 'ingreso';
-        if (action === 'UPDATE') movType = 'otros';
-        if (action === 'DELETE') movType = 'egreso';
-
-        const meta = typeof log.metadata === 'string' ? JSON.parse(log.metadata) : (log.metadata || {});
-
-        return {
-          id: log.id,
-          type: movType,
-          // Reforzamos los campos para que la UI no muestre 'Undefined'
-          description: log.description || `Acción ${action}`,
-          reason: log.description || `Operación de sistema (${action})`,
-          timestamp: log.created_at,
-          created_at: log.created_at,
-          operator: 'Usuario Sistema', 
-          sku: meta.sku || meta.barcode || '---',
-          product_name: log.description, 
-          // Campos planos para evitar errores de objetos anidados en la UI
-          size: meta.size || 'N/A',
-          color: meta.color || 'N/A',
-          base_product_name: log.description,
-          event_id: `LOG-${log.id}`,
-          change_amount: meta.stock_actual ? Number(meta.stock_actual) : 0,
-          is_batch: false,
-          is_annulled: false
-        };
-      });
-    } catch (e) {
-      console.error('CRITICAL: Inventory history fetch failed:', e);
+    if (error) {
+      console.error("Error calling get_inventory_history:", error);
       return [];
     }
+    
+    // El RPC ya devuelve los datos unidos con productos y variantes (product, size, color, etc)
+    return (data || []).map((m: any) => ({
+      ...m,
+      type: m.movement,      // Antes movement_type
+      
+      reason: m.action,      // Antes action_type
+      change_amount: m.quantity,
+      product_name: m.product, // Antes product_name
+      operator: m.operator_name || 'Sistema'
+    }));
   },
 
-  /**
-   * Annuls a batch of movements by inserting individual reversal records.
-   * Each reversal has a guaranteed non-null variant_id to satisfy the DB constraint.
-   * This replaces the old RPC approach which would create null variant_id rows.
-   */
+
   annulMovementsBatch: async (
-    sessionMovements: Array<{ variant_id: number | null; change_amount?: number }>,
-    operatorName: string,
-    userId: number,
+    sessionMovements: Array<{ variant_id: string; quantity?: number }>,
+    _operatorName: string,
+    userId: string,
     originalEventId: string | null
   ) => {
-    // Only process movements that have a real variant reference
-    const valid = sessionMovements.filter(
-      (m) => m.variant_id != null && m.variant_id !== undefined
-    );
+    const valid = sessionMovements.filter((m) => m.variant_id != null);
+    
+    for (const m of valid) {
+      const amount = Math.abs(m.quantity || 0);
+      const reversalType = (m.quantity || 0) > 0 ? 'EGRESO' : 'INGRESO';
 
-    if (valid.length === 0) {
-      throw new Error(
-        'No se encontraron variantes válidas para anular. Verifica que los movimientos tengan una variante asociada.'
+      await api.updateStock(
+        m.variant_id,
+        amount,
+        reversalType,
+        `ANULACION: Reversa de operación ${originalEventId ?? 'manual'}`,
+        userId
       );
     }
-
-    const annulEventId = `ANNUL_${originalEventId ?? 'manual'}_${Date.now()}`;
-
-    const annulEventId = `ANNUL_${originalEventId ?? 'manual'}_${Date.now()}`;
-
-    // 1. Ejecución directa en Supabase (Cloud-Only)
-    const { data: { session } } = await supabase.auth.getSession();
-    if (!session) {
-      console.log("ℹ️ [Cloud Sync] No active session. Skipping cloud annulment.");
-      return { success: true, annulEventId };
-    }
-
-    try {
-      const reversalRows = valid.map((m) => ({
-        variant_id: m.variant_id!,
-        user_id: userId,
-        change_amount: -(m.change_amount || 0),
-        reason: `ANULACION: Reversa de operación ${originalEventId ?? 'manual'} (Op: ${operatorName})`,
-        event_id: annulEventId,
-      }));
-
-      const { data, error } = await supabase.from('stock_movements').insert(reversalRows);
-      if (error) {
-        if ((error as any).status === 401 || (error as any).status === 400) {
-          console.warn("⚠️ [Cloud Auth] Unauthorized to annul in Supabase. Local change preserved.");
-          return { reversed: reversalRows.length };
-        }
-        throw error;
-      }
-      return { reversed: reversalRows.length, data };
-    } catch (e) {
-      console.error("[annulMovementsBatch] Cloud error:", e);
-      return { reversed: valid.length };
-    }
+    return true;
   },
 
-  recordMovement: async (params: {
-    variantId: number;
-    userId: number;
-    amount: number;
-    reason: string;
-    eventId?: string;
-  }) => {
-    const storeId = getCurrentStoreId();
+  getSuppliers: async () => {
+    const storeId = await getCurrentStoreId();
+    if (!storeId) return [];
+
     const { data, error } = await supabase
-      .from('stock_movements')
-      .insert([{
-        variant_id: params.variantId,
-        user_id: params.userId,
-        change_amount: params.amount,
-        reason: params.reason,
-        event_id: params.eventId || `EVENT-${Date.now()}`,
-        store_id: storeId
-      }])
+      .from('suppliers')
+      .select('*')
+      .eq('store_id', storeId)
+      .order('name');
+
+    if (error) return [];
+    return data || [];
+  },
+
+  createSupplier: async (supplier: any) => {
+    const storeId = await getCurrentStoreId();
+    const { data, error } = await supabase
+      .from('suppliers')
+      .insert({ ...supplier, store_id: storeId })
       .select()
       .single();
 
@@ -1255,34 +1236,16 @@ export const api = {
     return data;
   },
 
-  getSuppliers: async () => {
-    let query = supabase.from('suppliers').select('*');
-    const storeId = getCurrentStoreId();
-    if (storeId) query = query.eq('store_id', storeId);
-
-    const { data, error } = await query.order('name', { ascending: true });
-    if (error) throw error;
-    return data;
-  },
-
-  createSupplier: async (supplier: { name: string; cuit: string; phone?: string }) => {
-    const storeId = getCurrentStoreId();
-    const { data, error } = await supabase
-      .from('suppliers')
-      .insert([{ ...supplier, store_id: storeId }])
-      .select('*')
-      .single();
-    if (error) throw error;
-    return data;
-  },
-
-  updateSupplier: async (id: string, supplier: { name: string; cuit: string; phone?: string }) => {
+  updateSupplier: async (id: string, supplier: any) => {
+    const storeId = await getCurrentStoreId();
     const { data, error } = await supabase
       .from('suppliers')
       .update(supplier)
       .eq('id', id)
-      .select('*')
+      .eq('store_id', storeId)
+      .select()
       .single();
+
     if (error) throw error;
     return data;
   },
@@ -1312,5 +1275,52 @@ export const api = {
 
   getInventoryItemsREST: async () => {
     return api.getInventoryItems();
+  },
+
+  _mapUUID: (obj: any, type: 'variant' | 'product' | 'sale' | 'movement') => {
+    if (!obj) return obj;
+    const mapped = { ...obj };
+    if (type === 'variant') {
+      mapped.uuid = obj.id;
+      mapped.product_uuid = obj.product_id;
+    } else if (type === 'product') {
+      mapped.uuid = obj.id;
+    } else if (type === 'sale') {
+      mapped.uuid = obj.id;
+      mapped.client_uuid = obj.client_id;
+      mapped.user_uuid = obj.user_id;
+    } else if (type === 'movement') {
+      mapped.uuid = obj.id;
+      mapped.variant_uuid = obj.variant_id;
+    }
+    return mapped;
+  },
+
+  getCatalogAttributes: async () => {
+    try {
+      const saved = localStorage.getItem('arcadia_catalog_attributes');
+      return saved ? JSON.parse(saved) : { categories: [], brands: [], colors: [], seasons: [] };
+    } catch (e) {
+      return { categories: [], brands: [], colors: [], seasons: [] };
+    }
+  },
+
+  addCatalogAttribute: async (type: string, value: string) => {
+    try {
+      const saved = localStorage.getItem('arcadia_catalog_attributes');
+      let attributes = saved ? JSON.parse(saved) : {};
+      
+      if (!attributes[type]) attributes[type] = [];
+      if (!attributes[type].includes(value)) {
+        attributes[type].push(value);
+      }
+      
+      localStorage.setItem('arcadia_catalog_attributes', JSON.stringify(attributes));
+      window.dispatchEvent(new CustomEvent('refresh-attributes'));
+      return true;
+    } catch (e) {
+      console.error("Error adding catalog attribute:", e);
+      throw e;
+    }
   }
 };

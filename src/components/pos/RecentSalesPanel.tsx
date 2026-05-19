@@ -78,21 +78,21 @@ export const RecentSalesPanel: React.FC<RecentSalesPanelProps> = ({ refreshTrigg
                 >
                   <td className="px-6 py-4">
                     <p className="text-xs font-bold text-slate-600">
-                      {format(new Date(sale.timestamp), 'HH:mm', { locale: es })}
+                      {format(new Date(sale.created_at), 'HH:mm', { locale: es })}
                     </p>
                     <p className="text-[9px] text-slate-400 font-medium">
-                      {format(new Date(sale.timestamp), 'dd MMM', { locale: es })}
+                      {format(new Date(sale.created_at), 'dd MMM', { locale: es })}
                     </p>
                   </td>
                   <td className="px-6 py-4">
                     <div className="flex flex-col">
                       <span className="text-xs font-black text-slate-700 uppercase tracking-tight">
-                        {sale.clients?.name || 'Cliente Final'}
+                        {sale.client_id ? `Cliente: ${sale.client_id.substring(0, 8)}` : 'Consumidor Final'}
                       </span>
                       <div className="flex items-center gap-1 mt-0.5">
                         <User size={10} className="text-slate-300" />
                         <span className="text-[10px] text-slate-400 font-bold uppercase tracking-tighter">
-                          {sale.users?.name || 'Sistema'}
+                          {sale.user_id?.name || 'Sistema'}
                         </span>
                       </div>
                     </div>

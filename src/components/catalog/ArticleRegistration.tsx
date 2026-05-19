@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { 
   Package, 
   Tag, 
@@ -14,20 +14,16 @@ import {
   Smartphone,
   FileText,
   User,
-  ArrowRight,
   Save,
   X,
   Info,
-  AlertCircle,
-  PlusCircle,
-  ArrowLeft,
-  Image as ImageIcon
+  AlertCircle
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { api } from '../../services/api';
 import { Button, toast } from '../common/CommonUI';
 import { useOperator } from '../../context/OperatorContext';
-import { calculatePVP, calculateMargin, calculateCost, calculateDebitPrice, calculateCreditPrice } from '../../utils/pricing';
+import { calculatePVP, calculateMargin } from '../../utils/pricing';
 
 interface VariantRow {
   id: string;
@@ -35,7 +31,7 @@ interface VariantRow {
   color: string;
   size: string;
   stock: number;
-  stock_minimo: number;
+  stockMinimo: number;
   cost: number;
   margin: number;
   pvp: number;
@@ -93,24 +89,29 @@ export const ArticleRegistration = ({ onClose }: { onClose: () => void }) => {
   const [newSupplierPhone, setNewSupplierPhone] = useState('');
 
   // Catalog Attributes
-  const [dbAttributes, setDbAttributes] = useState<any>({
-    categories: ['Remeras', 'Pantalones', 'Abrigos', 'Accesorios', 'General'],
-    alpha: ['S', 'M', 'L', 'XL', 'XXL'],
-    numeric: ['38', '40', '42', '44', '46'],
-    colors: ['Negro', 'Blanco', 'Gris', 'Azul', 'Rojo'],
-    seasons: ['INV 24', 'VER 24', 'CONT', 'PRE-FA']
+  const [dbAttributes, setDbAttributes] = useState<any>(() => {
+    const saved = localStorage.getItem('arcadia_catalog_attributes');
+    if (saved) {
+      try {
+        return JSON.parse(saved);
+      } catch (e) {}
+    }
+    return {
+      categories: ['Remeras', 'Pantalones', 'Abrigos', 'Accesorios', 'General'],
+      alpha: ['S', 'M', 'L', 'XL', 'XXL'],
+      numeric: ['38', '40', '42', '44', '46'],
+      colors: ['Negro', 'Blanco', 'Gris', 'Azul', 'Rojo'],
+      seasons: ['INV 24', 'VER 24', 'CONT', 'PRE-FA']
+    };
   });
 
   const [isSeasonModalOpen, setIsSeasonModalOpen] = useState(false);
   const [newSeasonName, setNewSeasonName] = useState('');
 
-  const [isSearchingBarcode, setIsSearchingBarcode] = useState(false);
-
   // Debounced barcode lookup — only fires when barcode looks complete (≥13 chars EAN-13)
   useEffect(() => {
     const timer = setTimeout(async () => {
       if (barcode && barcode.length >= 13) { // EAN-13 standard length
-        setIsSearchingBarcode(true);
         try {
           const existingProduct = await api.getProductByBarcode(barcode);
           if (existingProduct) {
@@ -122,7 +123,6 @@ export const ArticleRegistration = ({ onClose }: { onClose: () => void }) => {
         } catch (error) {
           console.error("Error searching barcode:", error);
         } finally {
-          setIsSearchingBarcode(false);
         }
       }
     }, 800); // 800ms debounce to avoid firing mid-type
@@ -131,18 +131,11 @@ export const ArticleRegistration = ({ onClose }: { onClose: () => void }) => {
   }, [barcode]);
 
   const loadAttributes = async () => {
-    try {
-      const attrs = await api.getCatalogAttributes();
-      if (attrs && Array.isArray(attrs)) {
-        const grouped = attrs.reduce((acc: any, attr: any) => {
-          if (!acc[attr.type]) acc[attr.type] = [];
-          acc[attr.type].push(attr.value);
-          return acc;
-        }, {});
-        setDbAttributes((prev: any) => ({ ...prev, ...grouped }));
-      }
-    } catch (e) {
-      console.error("Error loading attributes", e);
+    const saved = localStorage.getItem('arcadia_catalog_attributes');
+    if (saved) {
+      try {
+        setDbAttributes(JSON.parse(saved));
+      } catch (e) {}
     }
   };
 
@@ -213,7 +206,7 @@ export const ArticleRegistration = ({ onClose }: { onClose: () => void }) => {
           color: pair.color,
           size: pair.size,
           stock: 0,
-          stock_minimo: baseStockMin,
+          stockMinimo: baseStockMin,
           cost: baseCost,
           margin: baseMargin,
           pvp: suggestedPVP
@@ -291,40 +284,42 @@ export const ArticleRegistration = ({ onClose }: { onClose: () => void }) => {
         brand,
         season,
         barcode: barcode || `BC-${Date.now()}`,
-        iva_rate: ivaRate,
-        price_cash: Number(variants[0]?.pvp || suggestedPVP || 0),
-        price_debit: Number(baseDebitPrice || variants[0]?.pvp || suggestedPVP || 0),
-        price_credit: Number(baseCreditPrice || variants[0]?.pvp || suggestedPVP || 0),
+        ivaRate: ivaRate,
+        priceCash: Number(variants[0]?.pvp || suggestedPVP || 0),
+        priceDebit: Number(baseDebitPrice || variants[0]?.pvp || suggestedPVP || 0),
+        priceCredit: Number(baseCreditPrice || variants[0]?.pvp || suggestedPVP || 0),
         cost: baseCost,
-        base_margin: baseMargin,
-        total_stock_minimo: baseStockMin,
+        baseMargin: baseMargin,
+        stockMinimo: baseStockMin,
         operator: operatorName,
-        provider_info: showProvider ? {
+        providerInfo: showProvider ? {
           name: providerName,
           cuit: providerCuit,
           phone: providerPhone,
           invoice_number: invoiceNumber,
           manual_prices: {
             efectivo: Number(variants[0]?.pvp || suggestedPVP || 0),
-            debito: Number(baseDebitPrice || variants[0]?.pvp || suggestedPVP || 0),
-            credito: Number(baseCreditPrice || variants[0]?.pvp || suggestedPVP || 0)
+            debito: Number(baseDebitPrice) || Number(variants[0]?.pvp || suggestedPVP || 0),
+            credito: Number(baseCreditPrice) || Number(variants[0]?.pvp || suggestedPVP || 0)
           }
         } : {
           manual_prices: {
             efectivo: Number(variants[0]?.pvp || suggestedPVP || 0),
-            debito: Number(baseDebitPrice || variants[0]?.pvp || suggestedPVP || 0),
-            credito: Number(baseCreditPrice || variants[0]?.pvp || suggestedPVP || 0)
+            debito: Number(baseDebitPrice) || Number(variants[0]?.pvp || suggestedPVP || 0),
+            credito: Number(baseCreditPrice) || Number(variants[0]?.pvp || suggestedPVP || 0)
           }
         },
         variants: variants.map(v => ({
-          sku: v.sku, // Enviar exactamente lo que se ve en la tabla
+          sku: v.sku, 
           size: v.size,
           color: v.color,
           stock: Number(v.stock),
-          stock_minimo: Number(v.stock_minimo),
+          stockMinimo: Number(v.stockMinimo) || 0,
           cost: Number(v.cost),
           margin: Number(v.margin),
-          pvp: Number(v.pvp)
+          priceCash: Number(v.pvp),
+          priceDebit: Number(baseDebitPrice || v.pvp),
+          priceCredit: Number(baseCreditPrice || v.pvp)
         }))
       };
 
@@ -960,10 +955,10 @@ export const ArticleRegistration = ({ onClose }: { onClose: () => void }) => {
                       <td className="px-6 py-4">
                         <input 
                           type="number" 
-                          value={v.stock_minimo}
-                          onChange={e => {
+                          value={v.stockMinimo}
+                          onChange={(e) => {
                             const next = [...variants];
-                            next[idx].stock_minimo = Number(e.target.value);
+                            next[idx].stockMinimo = Number(e.target.value);
                             setVariants(next);
                           }}
                           className="w-14 bg-error/5 rounded-lg px-2 py-1.5 text-[11px] font-black text-error outline-none text-center"

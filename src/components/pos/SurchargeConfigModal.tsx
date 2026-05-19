@@ -4,8 +4,10 @@ import {
   Save,
   Percent,
   Settings2,
-  AlertCircle
+  AlertCircle,
+  Trash2
 } from 'lucide-react';
+import { db } from '../../db/database';
 import { motion, AnimatePresence } from 'motion/react';
 import { PaymentFees } from './POS';
 
@@ -152,6 +154,29 @@ export const SurchargeConfigModal: React.FC<SurchargeConfigModalProps> = ({
                 <p className="text-[11px] font-bold text-amber-800 leading-relaxed">
                   Los cambios se aplicarán inmediatamente a las nuevas ventas y cálculos en el checkout. No afectan ventas ya realizadas.
                 </p>
+              </div>
+              <div className="pt-4 border-t border-slate-100">
+                <div className="flex items-center gap-2 mb-4">
+                  <h3 className="text-[10px] font-black text-rose-500 uppercase tracking-widest">Mantenimiento y Recuperación</h3>
+                  <div className="h-[1px] flex-1 bg-rose-100" />
+                </div>
+                <button
+                  type="button"
+                  onClick={async () => {
+                    if (confirm("¿Está seguro de que desea limpiar la cola de sincronización? Esto eliminará todas las tareas pendientes de subida a la nube.")) {
+                      try {
+                        await db.sync_queue.clear();
+                        alert("Cola de sincronización limpiada con éxito.");
+                      } catch (e) {
+                        alert("Error al limpiar la cola.");
+                      }
+                    }
+                  }}
+                  className="w-full flex items-center justify-center gap-3 p-4 bg-rose-50 text-rose-500 rounded-2xl border border-rose-100 hover:bg-rose-100 transition-all group"
+                >
+                  <Trash2 size={18} className="group-hover:scale-110 transition-transform" />
+                  <span className="text-[11px] font-black uppercase tracking-widest">Limpiar Cola de Sincronización</span>
+                </button>
               </div>
             </form>
 
