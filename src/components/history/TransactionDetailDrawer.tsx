@@ -18,7 +18,7 @@ import {
 } from 'lucide-react';
 import { motion } from 'motion/react';
 import { formatDate, formatCurrency } from '../../utils/format';
-import { api, API_BASE } from '../../services/api';
+import { api } from '../../services/api';
 import { SaleTicket } from './SaleTicket';
 
 interface TransactionDetailDrawerProps {
@@ -103,11 +103,7 @@ export function TransactionDetailDrawer({ transaction, onClose }: TransactionDet
     if (reason === null) return;
     if (!confirm('¿Estás seguro de anular esta venta? El stock se revertirá automáticamente.')) return;
     try {
-      await fetch(`${API_BASE}/api/sales/${transaction.id}/void`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ reason: reason || 'Anulación manual' })
-      });
+      await api.voidSale(transaction.id, reason || 'Anulación manual', transaction.user_id || '');
       window.dispatchEvent(new CustomEvent('refresh-sales'));
       onClose();
     } catch (err) {

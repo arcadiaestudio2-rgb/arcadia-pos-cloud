@@ -16,8 +16,6 @@ export const getCurrentStoreId = async (): Promise<string | null> => {
   return user?.id || null;
 };
 
-export const API_BASE = import.meta.env.VITE_API_URL || '';
-
 export const api = {
   supabase,
   getCurrentStoreId,
@@ -246,15 +244,194 @@ export const api = {
   fetchStats: async (timeFilter = 'Hoy') => {
     try {
       const storeId = await getCurrentStoreId();
-      const params = new URLSearchParams({ timeFilter });
-      if (storeId) params.append('storeId', storeId);
-      const res = await fetch(`${API_BASE}/api/dashboard/stats?${params}`);
-      if (!res.ok) throw new Error('Stats fetch failed');
-      return await res.json();
-    } catch (e: any) {
-      if (e?.name === 'AbortError') return null;
-      console.error("Error fetching stats:", e);
-      return { revenue: 0, cost: 0, ar: 0, topSeller: { name: '-', sales: 0, revenue: 0 }, criticalStock: [], agingDebtors: [], deadStock: [], weeklyRevenue: [], weeklyCost: [], paymentMix: {}, peakHours: [], avgTicket: 0, discountImpact: 0, periodTotalSales: 0 };
+      if (!storeId) throw new Error('No store ID');
+
+      const now = new Date();
+      const dateStart = (() => {
+        switch (timeFilter) {
+          case 'Ayer': return new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1);
+          case 'Mes': return new Date(now.getFullYear(), now.getMonth(), 1);
+          case 'Custom': return new Date(now.getTime() - 30 * 86400000);
+          default: return new Date(now.getFullYear(), now.getMonth(), now.getDate());
+        }
+      })();
+      const dateEnd = (() => {
+        if (timeFilter === 'Ayer') {
+          const d = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1, 23, 59, 59, 999);
+          return d;
+        }
+        return new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
+      })();
+
+      // ── 1. Sales stats ──────────────────────────────────────────────
+      const { data: sales } = await supabase
+        .from('sales')
+        .select('id, total, payment_method, created_at, user_id')
+        .eq('store_id', storeId)
+        .neq('status', 'voided')
+        .gte('created_at', dateStart.toISOString())
+        .lte('created_at', dateEnd.toISOString());
+
+      const saleList = (Array.isArray(sales) ? sales : []).filter((r: any) => r.created_at);
+      const revenue = saleList.reduce((s: number, r: any) => s + Number(r.total || 0), 0);
+      const saleCount = saleList.length;
+
+      // ── 2. Weekly revenue (single query) ────────────────────────────
+      const weekStart = new Date(now.getFullYear(), now.getMonth(), now.getDate() - 6);
+      const weekStartStr = new Date(weekStart.getFullYear(), weekStart.getMonth(), weekStart.getDate()).toISOString();
+      const { data: weekSales } = await supabase
+        .from('sales')
+        .select('total, created_at')
+        .eq('store_id', storeId)
+        .neq('status', 'voided')
+        .gte('created_at', weekStartStr);
+      const weeklyRevenue = new Array(7).fill(0);
+      for (const r of (weekSales || [])) {
+        const d = new Date(r.created_at);
+        if (isNaN(d.getTime())) continue;
+        const offset = Math.floor((new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime() - weekStart.getTime()) / 86400000);
+        if (offset >= 0 && offset < 7) weeklyRevenue[offset] += Number(r.total || 0);
+      }
+
+      // ── 3. Payment mix ──────────────────────────────────────────────
+      const paymentMix: Record<string, number> = { Efectivo: 0, Débito: 0, Crédito: 0, Transferencia: 0, CuentaCorriente: 0 };
+      const pmtMap: Record<string, string> = {
+        cash: 'Efectivo', efectivo: 'Efectivo',
+        debit: 'Débito', debito: 'Débito',
+        credit: 'Crédito', credito: 'Crédito',
+        qr: 'Transferencia', transferencia: 'Transferencia',
+        storecredit: 'CuentaCorriente', 'cuenta corriente': 'CuentaCorriente',
+      };
+      for (const r of saleList) {
+        const raw = String(r.payment_method || '').trim().toLowerCase();
+        const key = pmtMap[raw] || 'Efectivo';
+        paymentMix[key] = (paymentMix[key] || 0) + Number(r.total || 0);
+      }
+
+      // ── 4. Peak hours ───────────────────────────────────────────────
+      const peakHours = new Array(24).fill(0);
+      for (const r of saleList) {
+        const d = new Date(r.created_at);
+        if (isNaN(d.getTime())) continue;
+        const h = d.getHours();
+        if (h >= 0 && h < 24) peakHours[h]++;
+      }
+
+      // ── 5. Top seller ───────────────────────────────────────────────
+      const userRevenue: Record<string, { revenue: number; sales: number }> = {};
+      for (const r of saleList) {
+        const uid = r.user_id || 'unknown';
+        if (!userRevenue[uid]) userRevenue[uid] = { revenue: 0, sales: 0 };
+        userRevenue[uid].revenue += Number(r.total || 0);
+        userRevenue[uid].sales++;
+      }
+      let topSeller = { name: 'N/A', revenue: 0, sales: 0 };
+      const sorted = Object.entries(userRevenue).sort((a, b) => b[1].revenue - a[1].revenue);
+      if (sorted.length > 0) {
+        const [uid, data] = sorted[0];
+        try {
+          const { data: operator } = await supabase
+            .from('operators')
+            .select('name')
+            .eq('id', uid)
+            .single();
+          topSeller = { name: operator?.name || uid.slice(0, 8), revenue: data.revenue, sales: data.sales };
+        } catch { topSeller = { name: uid.slice(0, 8), revenue: data.revenue, sales: data.sales }; }
+      }
+
+      // ── 6. Critical stock ───────────────────────────────────────────
+      let criticalStock: any[] = [];
+      try {
+        const { data: rawV } = await supabase
+          .from('variants')
+          .select('id, sku, stock, stock_minimo, products(name)')
+          .eq('store_id', storeId)
+          .gt('stock_minimo', 0);
+        criticalStock = (rawV || [])
+          .filter((v: any) => Number(v.stock) <= Number(v.stock_minimo))
+          .slice(0, 5)
+          .map((v: any) => ({ id: v.id, name: v.products?.name || 'Unknown', sku: v.sku, stock: v.stock, min: v.stock_minimo }));
+      } catch (e) { /* RLS */ }
+
+      // ── 7. Aging debtors ────────────────────────────────────────────
+      let agingDebtors: any[] = [];
+      try {
+        const { data: clients } = await supabase
+          .from('clients')
+          .select('id, name, debt_balance')
+          .eq('store_id', storeId)
+          .gt('debt_balance', 0)
+          .order('debt_balance', { ascending: false })
+          .limit(5);
+        agingDebtors = (clients || []).map((c: any) => ({ id: c.id, name: c.name, debt: c.debt_balance, days: 0 }));
+      } catch (e) { /* RLS */ }
+
+      // ── 8. Dead stock ───────────────────────────────────────────────
+      let deadStock: any[] = [];
+      try {
+        const { data: variants } = await supabase
+          .from('variants')
+          .select('id, sku, stock, pvp, products(name)')
+          .eq('store_id', storeId)
+          .gt('stock', 0);
+        const vIds = (variants || []).map((v: any) => v.id);
+        let lastSaleMap: Record<string, string> = {};
+        if (vIds.length > 0) {
+          const { data: si } = await supabase
+            .from('sale_items')
+            .select('variant_id, sale_id')
+            .in('variant_id', vIds);
+          if (si) {
+            const sIds = [...new Set(si.map((x: any) => x.sale_id))];
+            const { data: ss } = await supabase
+              .from('sales')
+              .select('id, created_at')
+              .in('id', sIds);
+            const saleTime = Object.fromEntries((ss || []).map((x: any) => [x.id, x.created_at]));
+            for (const x of si) {
+              const ts = saleTime[x.sale_id];
+              if (ts && (!lastSaleMap[x.variant_id] || ts > lastSaleMap[x.variant_id])) {
+                lastSaleMap[x.variant_id] = ts;
+              }
+            }
+          }
+        }
+        deadStock = (variants || [])
+          .map((v: any) => ({
+            uuid: v.id, name: v.products?.name || 'Unknown', sku: v.sku,
+            stock: v.stock, loss: (v.pvp || 0) * v.stock,
+            last_sale_date: lastSaleMap[v.id] || '2000-01-01'
+          }))
+          .sort((a: any, b: any) => a.last_sale_date.localeCompare(b.last_sale_date))
+          .slice(0, 5);
+      } catch (e) { /* RLS */ }
+
+      return {
+        revenue,
+        cost: 0,
+        ar: 0,
+        topSeller,
+        criticalStock,
+        agingDebtors,
+        deadStock,
+        weeklyRevenue,
+        weeklyCost: new Array(7).fill(0),
+        paymentMix,
+        peakHours,
+        avgTicket: saleCount > 0 ? Math.round(revenue / saleCount) : 0,
+        discountImpact: 0,
+        periodTotalSales: saleCount,
+      };
+    } catch (e) {
+      console.error('fetchStats serverless error:', e);
+      return {
+        revenue: 0, cost: 0, ar: 0,
+        topSeller: { name: '-', sales: 0, revenue: 0 },
+        criticalStock: [], agingDebtors: [], deadStock: [],
+        weeklyRevenue: [], weeklyCost: [],
+        paymentMix: {}, peakHours: [],
+        avgTicket: 0, discountImpact: 0, periodTotalSales: 0,
+      };
     }
   },
 
@@ -673,7 +850,7 @@ export const api = {
     };
 
     try {
-      const response = await fetch(`${API_BASE}/api/sales`, {
+      const response = await fetch('/api/sales', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(mappedData),
@@ -1377,8 +1554,7 @@ export const api = {
   },
 
   generateTicketPdf: async (saleId: string, body?: { items?: any[], sale?: any }): Promise<string> => {
-    const baseUrl = API_BASE;
-    const res = await fetch(`${baseUrl}/api/sales/${saleId}/generate-pdf`, {
+    const res = await fetch(`/api/sales/${saleId}/generate-pdf`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: body ? JSON.stringify(body) : undefined,
